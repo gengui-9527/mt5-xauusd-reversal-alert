@@ -1,0 +1,13 @@
+XAUUSD M5 Reversal Alert build provenance
+Build date: 2026-08-12
+Compiler: MetaEditor 5.0.0.6104, X64 Regular
+Compile result: 0 errors, 0 warnings
+
+SHA256 XAUUSD_M5_Reversal_Alert.mq5
+68560B1613553C1B49EFA8D3BD2A53E0A043E6A4AC82BB0B87304C4AFA06BE9A
+
+SHA256 XAUUSD_M5_Reversal_Alert.ex5
+1D282D15911A533677A7D9B9942375307C10F39E8F6009CBD29685673A7C0E06
+
+The EX5 file was produced by compiling the MQ5 file in this repository using:
+C:\Program Files\MetaTrader 5\MetaEditor64.exe
