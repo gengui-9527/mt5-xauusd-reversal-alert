@@ -25,7 +25,9 @@ input int InpReconnectResetSeconds = 60;
 input bool InpEnableSound = true;
 input string InpLongSound = "alert.wav";
 input string InpShortSound = "timeout.wav";
-input bool InpEnablePopup = true;
+input bool InpEnablePopup = false;
+input bool InpEnableLargeNotification = true;
+input int InpLargeNotificationSeconds = 15;
 input bool   InpEnablePushPlus = true;
 input string InpPushPlusToken = "";
 input string InpPushPlusUrl = "https://www.pushplus.plus/send";
@@ -61,6 +63,8 @@ int g_confirmed_direction=DIR_NONE,g_pending_direction=DIR_NONE;
 ulong g_pending_elapsed_ms=0,g_last_pending_tick_ms=0;
 long g_last_tick_time_msc=0,g_previous_server_tick_msc=0;
 double g_last_tick_bid=0.0,g_last_tick_ask=0.0;
+bool g_large_visible=false;
+ulong g_large_hide_at_ms=0;
 SignalSnapshot g_snapshot;
 
 string DirectionText(const int direction)
@@ -89,7 +93,7 @@ bool ValidateInputs()
      { g_status="参数错误：RSI参数无效"; return false; }
    if(InpHoldSeconds<=0 || InpTimerMilliseconds<50 ||
       InpMaximumActiveTickGapMs<=0 || InpReconnectResetSeconds<=0 ||
-      InpPushPlusTimeoutMs<=0)
+      InpPushPlusTimeoutMs<=0 || InpLargeNotificationSeconds<=0)
      { g_status="参数错误：计时参数无效"; return false; }
    return true;
   }
@@ -418,6 +422,118 @@ bool SendPushPlus(const string title,const string content)
    g_push_status="服务端已接收"; g_push_warning="";
    return true;
   }
+string LargeObjectName(const string suffix)
+  { return g_panel_prefix+suffix; }
+void HideLargeNotification()
+  {
+   ObjectDelete(0,LargeObjectName("LARGE_BG"));
+   ObjectDelete(0,LargeObjectName("LARGE_TITLE"));
+   ObjectDelete(0,LargeObjectName("LARGE_BODY"));
+   ObjectDelete(0,LargeObjectName("LARGE_COUNTDOWN"));
+   ObjectDelete(0,LargeObjectName("LARGE_CLOSE"));
+   g_large_visible=false;
+   g_large_hide_at_ms=0;
+   ChartRedraw(0);
+  }
+void PositionLargeObject(const string suffix,const int x,const int y)
+  {
+   string name=LargeObjectName(suffix);
+   if(ObjectFind(0,name)<0) return;
+   ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+   ObjectSetInteger(0,name,OBJPROP_XDISTANCE,x);
+   ObjectSetInteger(0,name,OBJPROP_YDISTANCE,y);
+  }
+void CenterLargeNotification()
+  {
+   if(!g_large_visible) return;
+   long chart_width=0,chart_height=0;
+   if(!ChartGetInteger(0,CHART_WIDTH_IN_PIXELS,0,chart_width) ||
+      !ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS,0,chart_height))
+      return;
+   int box_width=560,box_height=300;
+   if(chart_width<620) box_width=(int)MathMax(340,chart_width-40);
+   if(chart_height<360) box_height=(int)MathMax(240,chart_height-40);
+   int left=(int)MathMax(10,(chart_width-box_width)/2);
+   int top=(int)MathMax(10,(chart_height-box_height)/2);
+   string bg=LargeObjectName("LARGE_BG");
+   ObjectSetInteger(0,bg,OBJPROP_XSIZE,box_width);
+   ObjectSetInteger(0,bg,OBJPROP_YSIZE,box_height);
+   PositionLargeObject("LARGE_BG",left,top);
+   PositionLargeObject("LARGE_TITLE",left+28,top+28);
+   PositionLargeObject("LARGE_BODY",left+30,top+92);
+   PositionLargeObject("LARGE_COUNTDOWN",left+30,top+box_height-42);
+   PositionLargeObject("LARGE_CLOSE",left+box_width-48,top+12);
+   ChartRedraw(0);
+  }
+void CreateLargeLabel(const string suffix,const string text,const int font_size,
+                      const color text_color)
+  {
+   string name=LargeObjectName(suffix);
+   if(ObjectFind(0,name)<0) ObjectCreate(0,name,OBJ_LABEL,0,0,0);
+   ObjectSetString(0,name,OBJPROP_TEXT,text);
+   ObjectSetString(0,name,OBJPROP_FONT,"Microsoft YaHei");
+   ObjectSetInteger(0,name,OBJPROP_FONTSIZE,font_size);
+   ObjectSetInteger(0,name,OBJPROP_COLOR,text_color);
+   ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);
+  }
+void ShowLargeNotification(const int previous_direction,const int direction,
+                           const SignalSnapshot &s)
+  {
+   if(!InpEnableLargeNotification) return;
+   HideLargeNotification();
+   string transition=(previous_direction==DIR_SHORT && direction==DIR_LONG)
+                     ? "空转多" : "多转空";
+   color accent=direction==DIR_LONG ? InpLongColor : InpShortColor;
+   string bg=LargeObjectName("LARGE_BG");
+   ObjectCreate(0,bg,OBJ_RECTANGLE_LABEL,0,0,0);
+   ObjectSetInteger(0,bg,OBJPROP_BGCOLOR,C'18,22,28');
+   ObjectSetInteger(0,bg,OBJPROP_BORDER_TYPE,BORDER_FLAT);
+   ObjectSetInteger(0,bg,OBJPROP_COLOR,accent);
+   ObjectSetInteger(0,bg,OBJPROP_WIDTH,4);
+   ObjectSetInteger(0,bg,OBJPROP_BACK,false);
+   ObjectSetInteger(0,bg,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,bg,OBJPROP_HIDDEN,true);
+
+   CreateLargeLabel("LARGE_TITLE",g_symbol+" · M5  "+transition,28,accent);
+   string body="服务器时间："+TimeToString(s.server_time,TIME_DATE|TIME_SECONDS)+
+               "\nEMA："+DirectionText(s.ema_vote)+
+               "    Supertrend："+DirectionText(s.supertrend_vote)+
+               "    RSI："+DirectionText(s.rsi_vote)+
+               "\nPushPlus："+g_push_status;
+   CreateLargeLabel("LARGE_BODY",body,15,clrWhite);
+   CreateLargeLabel("LARGE_COUNTDOWN","",12,clrSilver);
+
+   string close_name=LargeObjectName("LARGE_CLOSE");
+   ObjectCreate(0,close_name,OBJ_BUTTON,0,0,0);
+   ObjectSetInteger(0,close_name,OBJPROP_XSIZE,36);
+   ObjectSetInteger(0,close_name,OBJPROP_YSIZE,28);
+   ObjectSetString(0,close_name,OBJPROP_TEXT,"×");
+   ObjectSetString(0,close_name,OBJPROP_FONT,"Microsoft YaHei");
+   ObjectSetInteger(0,close_name,OBJPROP_FONTSIZE,14);
+   ObjectSetInteger(0,close_name,OBJPROP_COLOR,clrWhite);
+   ObjectSetInteger(0,close_name,OBJPROP_BGCOLOR,C'55,60,68');
+   ObjectSetInteger(0,close_name,OBJPROP_BORDER_COLOR,accent);
+   ObjectSetInteger(0,close_name,OBJPROP_HIDDEN,true);
+
+   g_large_visible=true;
+   g_large_hide_at_ms=GetTickCount64()+(ulong)InpLargeNotificationSeconds*1000;
+   CenterLargeNotification();
+  }
+void UpdateLargeNotification()
+  {
+   if(!g_large_visible) return;
+   ulong now_ms=GetTickCount64();
+   if(now_ms>=g_large_hide_at_ms)
+     { HideLargeNotification(); return; }
+   ulong remaining_ms=g_large_hide_at_ms-now_ms;
+   int remaining_seconds=(int)((remaining_ms+999)/1000);
+   string name=LargeObjectName("LARGE_COUNTDOWN");
+   if(ObjectFind(0,name)>=0)
+      ObjectSetString(0,name,OBJPROP_TEXT,
+                      IntegerToString(remaining_seconds)+" 秒后自动关闭");
+   ChartRedraw(0);
+  }
 void EmitConfirmedReversal(const int previous_direction,const int direction,
                            const SignalSnapshot &s)
   {
@@ -431,6 +547,7 @@ void EmitConfirmedReversal(const int previous_direction,const int direction,
    string content=BuildReversalContent(previous_direction,direction,s);
    if(InpEnablePopup) Alert(title,"\n",content);
    SendPushPlus(title,content);
+   ShowLargeNotification(previous_direction,direction,s);
   }
 void EnsureLabel(const string suffix,const int row)
   {
@@ -503,9 +620,27 @@ int OnInit()
    return INIT_SUCCEEDED;
   }
 void OnDeinit(const int reason)
-  { EventKillTimer(); ReleaseHandles(); ObjectsDeleteAll(0,g_panel_prefix); }
+  {
+   EventKillTimer();
+   HideLargeNotification();
+   ReleaseHandles();
+   ObjectsDeleteAll(0,g_panel_prefix);
+  }
+void OnChartEvent(const int id,const long &lparam,const double &dparam,
+                  const string &sparam)
+  {
+   if(id==CHARTEVENT_OBJECT_CLICK &&
+      sparam==LargeObjectName("LARGE_CLOSE"))
+     {
+      HideLargeNotification();
+      return;
+     }
+   if(id==CHARTEVENT_CHART_CHANGE)
+      CenterLargeNotification();
+  }
 void OnTimer()
   {
+   UpdateLargeNotification();
    if(!g_runtime_ready)
      { TryInitializeRuntime(); RenderPanel(); if(!g_runtime_ready) return; }
    MqlTick tick; if(!IsNewTargetTick(tick)) return;

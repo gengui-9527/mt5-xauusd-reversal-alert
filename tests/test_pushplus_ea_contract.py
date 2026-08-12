@@ -128,6 +128,45 @@ class PushPlusEaContractTests(unittest.TestCase):
         self.assertIn("remaining_ms", self.source)
         self.assertIn("剩余", self.source)
 
+    def test_large_notification_contract(self):
+        for required in (
+            "input int InpLargeNotificationSeconds = 15;",
+            "input bool InpEnableLargeNotification = true;",
+            "input bool InpEnablePopup = false;",
+            "void ShowLargeNotification(",
+            "void UpdateLargeNotification(",
+            "void CenterLargeNotification(",
+            "void HideLargeNotification(",
+            "void OnChartEvent(",
+            "CHARTEVENT_OBJECT_CLICK",
+            "CHARTEVENT_CHART_CHANGE",
+            "LARGE_BG",
+            "LARGE_TITLE",
+            "LARGE_BODY",
+            "LARGE_COUNTDOWN",
+            "LARGE_CLOSE",
+            "CHART_WIDTH_IN_PIXELS",
+            "CHART_HEIGHT_IN_PIXELS",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, self.source)
+
+    def test_large_notification_contains_full_reversal_context(self):
+        show_start = self.source.index("void ShowLargeNotification(")
+        show_end = self.source.index("void UpdateLargeNotification(")
+        show_source = self.source[show_start:show_end]
+        for text in (
+            "空转多",
+            "多转空",
+            "服务器时间",
+            "EMA",
+            "Supertrend",
+            "RSI",
+            "PushPlus",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, show_source)
+
     def test_contains_no_trading_api(self):
         for forbidden in (
             "#include <Trade/",
