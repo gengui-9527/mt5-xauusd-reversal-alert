@@ -238,45 +238,128 @@ string BuildReversalContent(const int previous_direction,const int direction,
   }
 bool IsJsonWhitespace(const ushort ch)
   { return ch==' ' || ch=='\t' || ch=='\r' || ch=='\n'; }
+void SkipJsonWhitespace(const string text,int &index)
+  {
+   int length=StringLen(text);
+   while(index<length && IsJsonWhitespace((ushort)StringGetCharacter(text,index))) index++;
+  }
+bool ParseJsonString(const string text,int &index,string &value)
+  {
+   int length=StringLen(text);
+   if(index>=length || StringGetCharacter(text,index)!='"') return false;
+   index++; value="";
+   while(index<length)
+     {
+      ushort ch=(ushort)StringGetCharacter(text,index++);
+      if(ch=='"') return true;
+      if(ch=='\\')
+        {
+         if(index>=length) return false;
+         ushort escaped=(ushort)StringGetCharacter(text,index++);
+         if(escaped=='"' || escaped=='\\' || escaped=='/') value+=ShortToString(escaped);
+         else if(escaped=='b') value+=ShortToString(8);
+         else if(escaped=='f') value+=ShortToString(12);
+         else if(escaped=='n') value+="\n";
+         else if(escaped=='r') value+="\r";
+         else if(escaped=='t') value+="\t";
+         else return false;
+        }
+      else if(ch<32) return false;
+      else value+=ShortToString(ch);
+     }
+   return false;
+  }
+bool SkipJsonValue(const string text,int &index)
+  {
+   int length=StringLen(text);
+   SkipJsonWhitespace(text,index);
+   if(index>=length) return false;
+   ushort first=(ushort)StringGetCharacter(text,index);
+   if(first=='"')
+     { string ignored; return ParseJsonString(text,index,ignored); }
+   if(first=='{' || first=='[')
+     {
+      ushort open=first,close=(first=='{' ? '}' : ']');
+      int depth=0; bool in_string=false,escaped=false;
+      while(index<length)
+        {
+         ushort ch=(ushort)StringGetCharacter(text,index++);
+         if(in_string)
+           {
+            if(escaped) escaped=false;
+            else if(ch=='\\') escaped=true;
+            else if(ch=='"') in_string=false;
+            continue;
+           }
+         if(ch=='"') in_string=true;
+         else if(ch==open) depth++;
+         else if(ch==close)
+           { depth--; if(depth==0) return true; }
+        }
+      return false;
+     }
+   int start=index;
+   while(index<length)
+     {
+      ushort ch=(ushort)StringGetCharacter(text,index);
+      if(ch==',' || ch=='}' || ch==']' || IsJsonWhitespace(ch)) break;
+      index++;
+     }
+   if(index==start) return false;
+   string literal=StringSubstr(text,start,index-start);
+   if(literal=="true" || literal=="false" || literal=="null") return true;
+   int p=0,literal_length=StringLen(literal);
+   if(StringGetCharacter(literal,p)=='-') p++;
+   if(p>=literal_length) return false;
+   if(StringGetCharacter(literal,p)=='0') p++;
+   else
+     {
+      ushort digit=(ushort)StringGetCharacter(literal,p);
+      if(digit<'1' || digit>'9') return false;
+      while(p<literal_length)
+        {
+         digit=(ushort)StringGetCharacter(literal,p);
+         if(digit<'0' || digit>'9') break;
+         p++;
+        }
+     }
+   return p==literal_length;
+  }
 PushResponseParseResult ParseTopLevelBusinessCode(const string response,int &code)
   {
    int length=StringLen(response),index=0;
-   while(index<length && IsJsonWhitespace((ushort)StringGetCharacter(response,index))) index++;
+   SkipJsonWhitespace(response,index);
    if(index>=length || StringGetCharacter(response,index)!='{') return PUSH_CODE_INVALID;
    index++;
+   bool code_found=false;
    while(index<length)
      {
-      while(index<length && IsJsonWhitespace((ushort)StringGetCharacter(response,index))) index++;
-      if(index<length && StringGetCharacter(response,index)=='}') return PUSH_CODE_MISSING;
-      if(index>=length || StringGetCharacter(response,index)!='"') return PUSH_CODE_INVALID;
-      index++;
+      SkipJsonWhitespace(response,index);
+      if(index<length && StringGetCharacter(response,index)=='}')
+        {
+         index++; SkipJsonWhitespace(response,index);
+         if(index!=length) return PUSH_CODE_INVALID;
+         return code_found ? PUSH_CODE_OK : PUSH_CODE_MISSING;
+        }
       string key="";
-      while(index<length && StringGetCharacter(response,index)!='"')
-        {
-         ushort ch=(ushort)StringGetCharacter(response,index);
-         if(ch=='\\') return PUSH_CODE_INVALID;
-         key+=ShortToString(ch); index++;
-        }
-      if(index>=length) return PUSH_CODE_INVALID;
-      index++;
-      while(index<length && IsJsonWhitespace((ushort)StringGetCharacter(response,index))) index++;
+      if(!ParseJsonString(response,index,key)) return PUSH_CODE_INVALID;
+      SkipJsonWhitespace(response,index);
       if(index>=length || StringGetCharacter(response,index)!=':') return PUSH_CODE_INVALID;
-      index++;
-      while(index<length && IsJsonWhitespace((ushort)StringGetCharacter(response,index))) index++;
-
-      bool quoted=false;
-      if(index<length && StringGetCharacter(response,index)=='"') { quoted=true; index++; }
-      int value_start=index;
-      if(index<length && (StringGetCharacter(response,index)=='-' || StringGetCharacter(response,index)=='+')) index++;
-      int digit_start=index;
-      while(index<length)
-        {
-         ushort digit=(ushort)StringGetCharacter(response,index);
-         if(digit<'0' || digit>'9') break;
-         index++;
-        }
+      index++; SkipJsonWhitespace(response,index);
       if(key=="code")
         {
+         if(code_found) return PUSH_CODE_INVALID;
+         bool quoted=false;
+         if(index<length && StringGetCharacter(response,index)=='"') { quoted=true; index++; }
+         int value_start=index;
+         if(index<length && StringGetCharacter(response,index)=='-') index++;
+         int digit_start=index;
+         while(index<length)
+           {
+            ushort digit=(ushort)StringGetCharacter(response,index);
+            if(digit<'0' || digit>'9') break;
+            index++;
+           }
          if(index==digit_start) return PUSH_CODE_INVALID;
          int value_end=index;
          if(quoted)
@@ -284,39 +367,13 @@ PushResponseParseResult ParseTopLevelBusinessCode(const string response,int &cod
             if(index>=length || StringGetCharacter(response,index)!='"') return PUSH_CODE_INVALID;
             index++;
            }
-         while(index<length && IsJsonWhitespace((ushort)StringGetCharacter(response,index))) index++;
-         if(index>=length || (StringGetCharacter(response,index)!=',' &&
-                              StringGetCharacter(response,index)!='}'))
-            return PUSH_CODE_INVALID;
          code=(int)StringToInteger(StringSubstr(response,value_start,value_end-value_start));
-         return PUSH_CODE_OK;
+         code_found=true;
         }
-      // For non-code fields, skip a simple JSON string, number, boolean, null, object, or array.
-      bool in_string=quoted;
-      int depth=0;
-      while(index<length)
-        {
-         ushort ch=(ushort)StringGetCharacter(response,index);
-         if(in_string)
-           {
-            if(ch=='\\') { index+=2; continue; }
-            if(ch=='"') in_string=false;
-           }
-         else
-           {
-            if(ch=='"') in_string=true;
-            else if(ch=='{' || ch=='[') depth++;
-            else if(ch=='}' || ch==']')
-              {
-               if(depth==0) break;
-               depth--;
-              }
-            else if(ch==',' && depth==0) break;
-           }
-         index++;
-        }
+      else if(!SkipJsonValue(response,index)) return PUSH_CODE_INVALID;
+      SkipJsonWhitespace(response,index);
       if(index<length && StringGetCharacter(response,index)==',') { index++; continue; }
-      if(index<length && StringGetCharacter(response,index)=='}') return PUSH_CODE_MISSING;
+      if(index<length && StringGetCharacter(response,index)=='}') continue;
       return PUSH_CODE_INVALID;
      }
    return PUSH_CODE_INVALID;
@@ -457,7 +514,8 @@ void OnTimer()
    g_snapshot=s; g_has_snapshot=true;
    int previous=g_confirmed_direction;
    bool confirmed=AdvanceReversalState(s.candidate,GetTickCount64());
-   MaybeSendStartupTest();
+   if(g_confirmed_direction!=DIR_NONE)
+      MaybeSendStartupTest();
    if(confirmed)
      { g_status="已确认"+BuildReversalTitle(previous,g_confirmed_direction);
        EmitConfirmedReversal(previous,g_confirmed_direction,s); }

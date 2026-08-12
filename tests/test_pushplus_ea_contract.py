@@ -93,6 +93,7 @@ class PushPlusEaContractTests(unittest.TestCase):
         startup_pos = timer.index("MaybeSendStartupTest")
         self.assertLess(read_pos, startup_pos)
         self.assertLess(baseline_pos, startup_pos)
+        self.assertIn("if(g_confirmed_direction!=DIR_NONE)", timer)
         init = self.source[
             self.source.index("int OnInit()") : self.source.index("void OnDeinit(")
         ]
@@ -107,6 +108,10 @@ class PushPlusEaContractTests(unittest.TestCase):
         self.assertIn("响应缺少业务码", self.source)
         self.assertIn("响应业务码格式无效", self.source)
         self.assertNotIn("StringToInteger(tail)", self.source)
+        self.assertIn("code_found", self.source)
+        self.assertIn("SkipJsonValue", self.source)
+        self.assertIn("index!=length", self.source)
+        self.assertNotIn("ch=='+'", self.source)
 
     def test_sound_and_pushplus_warnings_have_separate_ownership(self):
         self.assertIn("g_sound_warning", self.source)
