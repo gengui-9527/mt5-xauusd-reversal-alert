@@ -208,3 +208,64 @@ Copy to `C:\Users\Administrator\Desktop\XAUUSD_M5_Reversal_Alert_EA.ex5`, compar
 - [ ] **Step 7: Send an explicitly authorized App-channel test**
 
 Use the user-provided Token only in process memory to POST a connection test with `channel=app`. Print only the sanitized PushPlus business code, message, and request ID, never the Token or request body. Confirm the user receives the PushPlus App notification with system sound.
+
+### Task 6: Large Centered Reversal Notification
+
+**Files:**
+- Modify: `MQL5/Experts/XAUUSD_M5_Reversal_Alert_EA.mq5`
+- Modify: `tests/test_pushplus_ea_contract.py`
+- Modify: `README.md`
+
+**Interfaces:**
+- Produces `ShowLargeNotification`, `UpdateLargeNotification`, `CenterLargeNotification`, and `HideLargeNotification`.
+- Consumes the confirmed reversal direction, `SignalSnapshot`, and PushPlus send status.
+- Handles `OnChartEvent` for close-button clicks and chart-size changes.
+
+- [ ] **Step 1: Add failing UI contract tests**
+
+Require:
+
+```python
+self.assertIn("input int InpLargeNotificationSeconds = 15;", source)
+self.assertIn("input bool InpEnableLargeNotification = true;", source)
+self.assertIn("input bool InpEnablePopup = false;", source)
+self.assertIn("void ShowLargeNotification(", source)
+self.assertIn("void UpdateLargeNotification(", source)
+self.assertIn("void CenterLargeNotification(", source)
+self.assertIn("void HideLargeNotification(", source)
+self.assertIn("void OnChartEvent(", source)
+self.assertIn("CHARTEVENT_OBJECT_CLICK", source)
+self.assertIn("CHARTEVENT_CHART_CHANGE", source)
+```
+
+Also require namespaced rectangle, title, body, countdown and close-button objects, long/short colors, server time, all three votes, PushPlus status, and remaining seconds.
+
+- [ ] **Step 2: Run the focused test and verify failure**
+
+Run:
+
+```powershell
+python -m unittest tests.test_pushplus_ea_contract -v
+```
+
+Expected: FAIL because the notification API and default popup behavior do not exist.
+
+- [ ] **Step 3: Implement the notification object lifecycle**
+
+Create a centered `OBJ_RECTANGLE_LABEL` background and border, title/body/countdown `OBJ_LABEL` objects, and `OBJ_BUTTON` close control using the instance prefix. Show on confirmed reversal, refresh on a later reversal, update countdown from `OnTimer`, and delete objects after the configured positive duration.
+
+- [ ] **Step 4: Implement chart interaction**
+
+Handle close-button `CHARTEVENT_OBJECT_CLICK` by hiding the notification without changing the signal state. Handle `CHARTEVENT_CHART_CHANGE` by reading `CHART_WIDTH_IN_PIXELS` and `CHART_HEIGHT_IN_PIXELS` and re-centering visible notification objects.
+
+- [ ] **Step 5: Update alert ordering and defaults**
+
+Default `InpEnablePopup` to `false`. On a confirmed reversal: play sound, send PushPlus, then display the large notification with the resulting PushPlus status so the full content is visible. Failures in drawing must not block sound or PushPlus.
+
+- [ ] **Step 6: Update Chinese documentation**
+
+Document the 15-second green/red centered notification, manual close, auto-close, resize behavior, and optional legacy MT5 popup.
+
+- [ ] **Step 7: Verify, compile, review, and deliver**
+
+Run the full Python suite, forbidden trading/Token scans, `git diff --check`, and MetaEditor. Require `0 errors, 0 warnings`; refresh provenance hashes; independently review object lifecycle and resize/click behavior; copy the matching EX5 to the desktop.
