@@ -31,7 +31,8 @@ class PushPlusEaContractTests(unittest.TestCase):
             'input string InpPushPlusUrl = "https://www.pushplus.plus/send";',
             self.source,
         )
-        self.assertIn('input string InpPushPlusChannel = "wechat";', self.source)
+        self.assertIn('input string InpPushPlusChannel = "app";', self.source)
+        self.assertNotIn('input string InpPushPlusChannel = "wechat";', self.source)
         self.assertIn('input string InpPushPlusTemplate = "txt";', self.source)
         self.assertIn("input int    InpPushPlusTimeoutMs = 5000;", self.source)
         self.assertIn("input bool   InpSendStartupTest", self.source)
