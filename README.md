@@ -88,3 +88,51 @@ EMA、ATR 和 RSI 周期的允许范围为 1–500；Supertrend 历史递推最�
 - `verification/build-provenance.txt`：编译结果和源码/EX5 哈希。
 - `docs/superpowers/specs/2026-08-12-xauusd-m5-reversal-alert-design.md`：已批准设计。
 - `docs/superpowers/plans/2026-08-12-xauusd-m5-reversal-alert.md`：实施计划。
+
+## PushPlus 微信提醒 EA
+
+`XAUUSD_M5_Reversal_Alert_EA` 是仅提醒、不交易的 EA。它沿用指标的
+XAUUSD M5 三因子和 10 秒确认规则，只在已确认的多转空或空转多发生时
+同步发送声音、MT5 弹窗和 PushPlus 微信消息。
+
+### 安装
+
+1. 将 `MQL5\Experts\XAUUSD_M5_Reversal_Alert_EA.ex5` 复制到 MT5 数据目录的
+   `MQL5\Experts`。
+2. 在 MT5 中选择“工具 → 选项 → 智能交易系统”。
+3. 勾选“允许所列 URL 的 WebRequest”，加入：
+   `https://www.pushplus.plus`
+4. 回到导航器，在“智能交易系统”上右键刷新，并把 EA 加载到任意图表。
+5. 在输入参数 `InpPushPlusToken` 中填写自己的 PushPlus Token。
+6. 保持 `InpEnablePushPlus=true`，渠道默认为 `wechat`。
+7. 开启 MT5 的“算法交易”，使 EA 定时器和网络请求能够运行。
+
+EA 没有导入交易库，也不含下单、平仓或改单代码。开启算法交易只允许 EA
+运行，不会让本 EA 自动交易。
+
+### PushPlus 参数与测试
+
+- `InpPushPlusToken`：默认空，只在 MT5 运行参数中填写，不写入源码或 Git。
+- `InpPushPlusUrl`：默认 `https://www.pushplus.plus/send`。
+- `InpPushPlusChannel`：默认 `wechat`。
+- `InpPushPlusTemplate`：默认 `txt`。
+- `InpPushPlusTimeoutMs`：默认 5000 毫秒。
+- `InpSendStartupTest`：默认关闭。临时开启后，每次加载 EA 最多发送一次连接测试；
+  它不会伪造多空方向，也不改变信号状态。
+
+开发和编译过程没有使用用户 Token，也没有执行真实外部推送。
+
+### 故障排查
+
+- 显示 `Token 未配置`：在 EA 输入参数中填写 Token 后重新加载。
+- 显示请求失败或 MT5 错误 4014：确认程序是
+  `MQL5\Experts` 中的 EA，并把 `https://www.pushplus.plus` 加入 WebRequest
+  白名单。
+- 显示 HTTP 状态：检查网络、防火墙、代理和 PushPlus 服务状态。
+- 显示业务码：请求已到达 PushPlus，但接口拒绝；检查 Token 和账号绑定。
+- 显示“服务端已接收”：PushPlus 已接收异步请求，不代表微信最终一定送达；
+  还需检查 PushPlus 账号的微信绑定和渠道配置。
+- 修改 Token、URL 或白名单后，卸载并重新加载 EA。
+
+面板和 Experts 日志不会输出 Token、完整请求体或含 Token 的 URL。PushPlus
+失败不会阻断行情监控，也不会为同一次已确认转换自动重试，避免重复消息。
