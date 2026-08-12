@@ -49,6 +49,9 @@ struct SignalSnapshot
    datetime server_time;
   };
 
+const int MAX_INDICATOR_PERIOD = 500;
+const int MAX_HISTORY_BARS = 5000;
+
 string g_symbol = "";
 string g_status = "正在初始化";
 string g_warning_status = "";
@@ -101,14 +104,33 @@ bool ValidateInputs()
       g_status = "参数错误：EMA周期必须满足 0 < 快线 < 慢线";
       return false;
      }
+   if(InpFastEmaPeriod > MAX_INDICATOR_PERIOD ||
+      InpSlowEmaPeriod > MAX_INDICATOR_PERIOD)
+     {
+      g_status = "参数错误：EMA周期不能超过 " +
+                 IntegerToString(MAX_INDICATOR_PERIOD);
+      return false;
+     }
    if(InpAtrPeriod <= 0 || InpSupertrendMultiplier <= 0.0)
      {
       g_status = "参数错误：ATR周期和Supertrend倍数必须为正";
       return false;
      }
+   if(InpAtrPeriod > MAX_INDICATOR_PERIOD)
+     {
+      g_status = "参数错误：ATR周期不能超过 " +
+                 IntegerToString(MAX_INDICATOR_PERIOD);
+      return false;
+     }
    if(InpRsiPeriod <= 0 || InpRsiMidpoint <= 0.0 || InpRsiMidpoint >= 100.0)
      {
       g_status = "参数错误：RSI周期或中轴无效";
+      return false;
+     }
+   if(InpRsiPeriod > MAX_INDICATOR_PERIOD)
+     {
+      g_status = "参数错误：RSI周期不能超过 " +
+                 IntegerToString(MAX_INDICATOR_PERIOD);
       return false;
      }
    if(InpHoldSeconds <= 0 || InpTimerMilliseconds < 50 ||
@@ -226,9 +248,8 @@ void ReleaseResources()
 
 int RequiredHistoryBars()
   {
-   int longest_period = MathMax(InpSlowEmaPeriod,
-                                MathMax(InpAtrPeriod,InpRsiPeriod));
-   return MathMax(200,longest_period*10);
+   int atr_warmup = InpAtrPeriod*10;
+   return MathMin(MAX_HISTORY_BARS,MathMax(200,atr_warmup));
   }
 
 int MajorityVote(const int ema_vote,const int supertrend_vote,const int rsi_vote)

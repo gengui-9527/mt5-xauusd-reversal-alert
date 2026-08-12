@@ -28,6 +28,15 @@ class MqlContractTests(unittest.TestCase):
         self.assertIn("RequiredHistoryBars", SOURCE)
         self.assertNotIn("const int    COPY_BARS    = 200;", SOURCE)
 
+    def test_indicator_periods_and_history_are_bounded(self):
+        self.assertIn("MAX_INDICATOR_PERIOD", SOURCE)
+        self.assertIn("MAX_HISTORY_BARS", SOURCE)
+        self.assertIn("InpFastEmaPeriod > MAX_INDICATOR_PERIOD", SOURCE)
+        self.assertIn("InpSlowEmaPeriod > MAX_INDICATOR_PERIOD", SOURCE)
+        self.assertIn("InpAtrPeriod > MAX_INDICATOR_PERIOD", SOURCE)
+        self.assertIn("InpRsiPeriod > MAX_INDICATOR_PERIOD", SOURCE)
+        self.assertIn("MathMin(MAX_HISTORY_BARS", SOURCE)
+
     def test_source_contains_no_trading_api(self):
         for forbidden in ("OrderSend", "CTrade", "PositionOpen", "trade.Buy",
                           "trade.Sell"):
