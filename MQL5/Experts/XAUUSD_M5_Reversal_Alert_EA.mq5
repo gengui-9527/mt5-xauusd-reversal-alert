@@ -65,6 +65,8 @@ long g_last_tick_time_msc=0,g_previous_server_tick_msc=0;
 double g_last_tick_bid=0.0,g_last_tick_ask=0.0;
 bool g_large_visible=false;
 ulong g_large_hide_at_ms=0;
+int g_large_font_size=15;
+int g_large_title_font_size=28;
 SignalSnapshot g_snapshot;
 
 string DirectionText(const int direction)
@@ -450,19 +452,31 @@ void CenterLargeNotification()
    if(!ChartGetInteger(0,CHART_WIDTH_IN_PIXELS,0,chart_width) ||
       !ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS,0,chart_height))
       return;
-   int box_width=560,box_height=300;
-   if(chart_width<620) box_width=(int)MathMax(340,chart_width-40);
-   if(chart_height<360) box_height=(int)MathMax(240,chart_height-40);
-   int left=(int)MathMax(10,(chart_width-box_width)/2);
-   int top=(int)MathMax(10,(chart_height-box_height)/2);
+   int available_width=(int)MathMax(120,chart_width-20);
+   int available_height=(int)MathMax(120,chart_height-20);
+   int box_width=(int)MathMin(560,available_width);
+   int box_height=(int)MathMin(300,available_height);
+   g_large_font_size=(box_width<440 || box_height<260) ? 11 : 15;
+   g_large_title_font_size=(box_width<440 || box_height<260) ? 20 : 28;
+   int padding=(box_width<440 ? 16 : 30);
+   int title_top=(box_height<260 ? 18 : 28);
+   int body_top=(box_height<260 ? 68 : 92);
+   int left=(int)MathMax(0,(chart_width-box_width)/2);
+   int top=(int)MathMax(0,(chart_height-box_height)/2);
    string bg=LargeObjectName("LARGE_BG");
    ObjectSetInteger(0,bg,OBJPROP_XSIZE,box_width);
    ObjectSetInteger(0,bg,OBJPROP_YSIZE,box_height);
    PositionLargeObject("LARGE_BG",left,top);
-   PositionLargeObject("LARGE_TITLE",left+28,top+28);
-   PositionLargeObject("LARGE_BODY",left+30,top+92);
-   PositionLargeObject("LARGE_COUNTDOWN",left+30,top+box_height-42);
-   PositionLargeObject("LARGE_CLOSE",left+box_width-48,top+12);
+   PositionLargeObject("LARGE_TITLE",left+padding,top+title_top);
+   PositionLargeObject("LARGE_BODY",left+padding,top+body_top);
+   PositionLargeObject("LARGE_COUNTDOWN",left+padding,top+box_height-34);
+   PositionLargeObject("LARGE_CLOSE",left+box_width-42,top+8);
+   ObjectSetInteger(0,LargeObjectName("LARGE_TITLE"),OBJPROP_FONTSIZE,
+                    g_large_title_font_size);
+   ObjectSetInteger(0,LargeObjectName("LARGE_BODY"),OBJPROP_FONTSIZE,
+                    g_large_font_size);
+   ObjectSetInteger(0,LargeObjectName("LARGE_COUNTDOWN"),OBJPROP_FONTSIZE,
+                    MathMax(9,g_large_font_size-3));
    ChartRedraw(0);
   }
 void CreateLargeLabel(const string suffix,const string text,const int font_size,
@@ -476,6 +490,7 @@ void CreateLargeLabel(const string suffix,const string text,const int font_size,
    ObjectSetInteger(0,name,OBJPROP_COLOR,text_color);
    ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
    ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);
+   ObjectSetInteger(0,name,OBJPROP_ZORDER,1);
   }
 void ShowLargeNotification(const int previous_direction,const int direction,
                            const SignalSnapshot &s)
@@ -494,6 +509,7 @@ void ShowLargeNotification(const int previous_direction,const int direction,
    ObjectSetInteger(0,bg,OBJPROP_BACK,false);
    ObjectSetInteger(0,bg,OBJPROP_SELECTABLE,false);
    ObjectSetInteger(0,bg,OBJPROP_HIDDEN,true);
+   ObjectSetInteger(0,bg,OBJPROP_ZORDER,1);
 
    CreateLargeLabel("LARGE_TITLE",g_symbol+" · M5  "+transition,28,accent);
    string body="服务器时间："+TimeToString(s.server_time,TIME_DATE|TIME_SECONDS)+
@@ -515,6 +531,9 @@ void ShowLargeNotification(const int previous_direction,const int direction,
    ObjectSetInteger(0,close_name,OBJPROP_BGCOLOR,C'55,60,68');
    ObjectSetInteger(0,close_name,OBJPROP_BORDER_COLOR,accent);
    ObjectSetInteger(0,close_name,OBJPROP_HIDDEN,true);
+   ObjectSetInteger(0,close_name,OBJPROP_SELECTABLE,true);
+   ObjectSetInteger(0,close_name,OBJPROP_STATE,false);
+   ObjectSetInteger(0,close_name,OBJPROP_ZORDER,100);
 
    g_large_visible=true;
    g_large_hide_at_ms=GetTickCount64()+(ulong)InpLargeNotificationSeconds*1000;

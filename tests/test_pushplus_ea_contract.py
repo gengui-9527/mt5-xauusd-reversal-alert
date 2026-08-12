@@ -167,6 +167,19 @@ class PushPlusEaContractTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIn(text, show_source)
 
+    def test_large_notification_adapts_and_prioritizes_close_button(self):
+        for required in (
+            "available_width",
+            "available_height",
+            "large_font_size",
+            "OBJPROP_ZORDER,1",
+            "OBJPROP_ZORDER,100",
+            "OBJPROP_STATE,false",
+            "OBJPROP_SELECTABLE,true",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, self.source)
+
     def test_contains_no_trading_api(self):
         for forbidden in (
             "#include <Trade/",
