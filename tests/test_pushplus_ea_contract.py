@@ -86,6 +86,41 @@ class PushPlusEaContractTests(unittest.TestCase):
             with self.subTest(pattern=pattern):
                 self.assertIsNone(re.search(pattern, self.source, re.DOTALL))
 
+    def test_startup_test_waits_for_live_snapshot_and_baseline(self):
+        timer = self.source[self.source.index("void OnTimer()") :]
+        read_pos = timer.index("ReadLiveSignal")
+        baseline_pos = timer.index("AdvanceReversalState")
+        startup_pos = timer.index("MaybeSendStartupTest")
+        self.assertLess(read_pos, startup_pos)
+        self.assertLess(baseline_pos, startup_pos)
+        init = self.source[
+            self.source.index("int OnInit()") : self.source.index("void OnDeinit(")
+        ]
+        self.assertNotIn("MaybeSendStartupTest();", init)
+
+    def test_business_response_parser_is_strict_and_classifies_errors(self):
+        self.assertIn("enum PushResponseParseResult", self.source)
+        self.assertIn("PUSH_CODE_MISSING", self.source)
+        self.assertIn("PUSH_CODE_INVALID", self.source)
+        self.assertIn("PUSH_CODE_OK", self.source)
+        self.assertIn("ParseTopLevelBusinessCode", self.source)
+        self.assertIn("响应缺少业务码", self.source)
+        self.assertIn("响应业务码格式无效", self.source)
+        self.assertNotIn("StringToInteger(tail)", self.source)
+
+    def test_sound_and_pushplus_warnings_have_separate_ownership(self):
+        self.assertIn("g_sound_warning", self.source)
+        self.assertIn("g_push_warning", self.source)
+        send = self.source[
+            self.source.index("bool SendPushPlus(") :
+            self.source.index("void EmitConfirmedReversal(")
+        ]
+        self.assertNotIn("g_sound_warning=", send)
+
+    def test_panel_displays_remaining_confirmation_time(self):
+        self.assertIn("remaining_ms", self.source)
+        self.assertIn("剩余", self.source)
+
     def test_contains_no_trading_api(self):
         for forbidden in (
             "#include <Trade/",

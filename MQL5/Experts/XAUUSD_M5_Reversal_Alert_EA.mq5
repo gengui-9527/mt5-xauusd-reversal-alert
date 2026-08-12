@@ -4,6 +4,12 @@
 #property description "Non-trading XAUUSD M5 reversal alerts with PushPlus."
 
 enum SignalDirection { DIR_SHORT=-1, DIR_NONE=0, DIR_LONG=1 };
+enum PushResponseParseResult
+  {
+   PUSH_CODE_MISSING=-1,
+   PUSH_CODE_INVALID=0,
+   PUSH_CODE_OK=1
+  };
 
 input string InpSymbol = "XAUUSD";
 input int InpFastEmaPeriod = 9;
@@ -45,7 +51,8 @@ struct SignalSnapshot
 
 const int MAX_INDICATOR_PERIOD=500;
 const int MAX_HISTORY_BARS=5000;
-string g_symbol="",g_status="正在初始化",g_warning_status="",g_push_status="未发送";
+string g_symbol="",g_status="正在初始化",g_push_status="未发送";
+string g_sound_warning="",g_push_warning="";
 string g_panel_prefix="";
 bool g_runtime_ready=false,g_has_snapshot=false,g_startup_test_attempted=false;
 int g_fast_ema_handle=INVALID_HANDLE,g_slow_ema_handle=INVALID_HANDLE;
@@ -229,23 +236,96 @@ string BuildReversalContent(const int previous_direction,const int direction,
           "\nRSI："+DirectionText(s.rsi_vote)+
           "\n确认时间："+IntegerToString(InpHoldSeconds)+" 秒";
   }
-int ParseBusinessCode(const string response)
+bool IsJsonWhitespace(const ushort ch)
+  { return ch==' ' || ch=='\t' || ch=='\r' || ch=='\n'; }
+PushResponseParseResult ParseTopLevelBusinessCode(const string response,int &code)
   {
-   int pos=StringFind(response,"\"code\"");
-   if(pos<0) return -2147483647;
-   pos=StringFind(response,":",pos);
-   if(pos<0) return -2147483647;
-   string tail=StringSubstr(response,pos+1);
-   StringTrimLeft(tail);
-   if(StringLen(tail)>0 && StringGetCharacter(tail,0)=='"')
-      tail=StringSubstr(tail,1);
-   return (int)StringToInteger(tail);
+   int length=StringLen(response),index=0;
+   while(index<length && IsJsonWhitespace((ushort)StringGetCharacter(response,index))) index++;
+   if(index>=length || StringGetCharacter(response,index)!='{') return PUSH_CODE_INVALID;
+   index++;
+   while(index<length)
+     {
+      while(index<length && IsJsonWhitespace((ushort)StringGetCharacter(response,index))) index++;
+      if(index<length && StringGetCharacter(response,index)=='}') return PUSH_CODE_MISSING;
+      if(index>=length || StringGetCharacter(response,index)!='"') return PUSH_CODE_INVALID;
+      index++;
+      string key="";
+      while(index<length && StringGetCharacter(response,index)!='"')
+        {
+         ushort ch=(ushort)StringGetCharacter(response,index);
+         if(ch=='\\') return PUSH_CODE_INVALID;
+         key+=ShortToString(ch); index++;
+        }
+      if(index>=length) return PUSH_CODE_INVALID;
+      index++;
+      while(index<length && IsJsonWhitespace((ushort)StringGetCharacter(response,index))) index++;
+      if(index>=length || StringGetCharacter(response,index)!=':') return PUSH_CODE_INVALID;
+      index++;
+      while(index<length && IsJsonWhitespace((ushort)StringGetCharacter(response,index))) index++;
+
+      bool quoted=false;
+      if(index<length && StringGetCharacter(response,index)=='"') { quoted=true; index++; }
+      int value_start=index;
+      if(index<length && (StringGetCharacter(response,index)=='-' || StringGetCharacter(response,index)=='+')) index++;
+      int digit_start=index;
+      while(index<length)
+        {
+         ushort digit=(ushort)StringGetCharacter(response,index);
+         if(digit<'0' || digit>'9') break;
+         index++;
+        }
+      if(key=="code")
+        {
+         if(index==digit_start) return PUSH_CODE_INVALID;
+         int value_end=index;
+         if(quoted)
+           {
+            if(index>=length || StringGetCharacter(response,index)!='"') return PUSH_CODE_INVALID;
+            index++;
+           }
+         while(index<length && IsJsonWhitespace((ushort)StringGetCharacter(response,index))) index++;
+         if(index>=length || (StringGetCharacter(response,index)!=',' &&
+                              StringGetCharacter(response,index)!='}'))
+            return PUSH_CODE_INVALID;
+         code=(int)StringToInteger(StringSubstr(response,value_start,value_end-value_start));
+         return PUSH_CODE_OK;
+        }
+      // For non-code fields, skip a simple JSON string, number, boolean, null, object, or array.
+      bool in_string=quoted;
+      int depth=0;
+      while(index<length)
+        {
+         ushort ch=(ushort)StringGetCharacter(response,index);
+         if(in_string)
+           {
+            if(ch=='\\') { index+=2; continue; }
+            if(ch=='"') in_string=false;
+           }
+         else
+           {
+            if(ch=='"') in_string=true;
+            else if(ch=='{' || ch=='[') depth++;
+            else if(ch=='}' || ch==']')
+              {
+               if(depth==0) break;
+               depth--;
+              }
+            else if(ch==',' && depth==0) break;
+           }
+         index++;
+        }
+      if(index<length && StringGetCharacter(response,index)==',') { index++; continue; }
+      if(index<length && StringGetCharacter(response,index)=='}') return PUSH_CODE_MISSING;
+      return PUSH_CODE_INVALID;
+     }
+   return PUSH_CODE_INVALID;
   }
 bool SendPushPlus(const string title,const string content)
   {
    if(!InpEnablePushPlus) { g_push_status="已关闭"; return false; }
    if(StringLen(InpPushPlusToken)==0)
-     { g_push_status="Token 未配置"; g_warning_status="PushPlus Token 未配置"; return false; }
+     { g_push_status="Token 未配置"; g_push_warning="PushPlus Token 未配置"; return false; }
    string json="{\"token\":\""+JsonEscape(InpPushPlusToken)+"\","+
                "\"title\":\""+JsonEscape(title)+"\","+
                "\"content\":\""+JsonEscape(content)+"\","+
@@ -261,14 +341,21 @@ bool SendPushPlus(const string title,const string content)
                        post,result,response_headers);
    if(http==-1)
      { int error=GetLastError(); g_push_status="请求失败，MT5错误 "+IntegerToString(error);
-       g_warning_status="PushPlus 请求失败，请检查 WebRequest 白名单"; Print(g_push_status); return false; }
+       g_push_warning="PushPlus 请求失败，请检查 WebRequest 白名单"; Print(g_push_status); return false; }
    if(http!=200)
-     { g_push_status="HTTP "+IntegerToString(http); Print("PushPlus ",g_push_status); return false; }
+     { g_push_status="HTTP "+IntegerToString(http); g_push_warning=g_push_status;
+       Print("PushPlus ",g_push_status); return false; }
    string response=CharArrayToString(result,0,WHOLE_ARRAY,CP_UTF8);
-   int code=ParseBusinessCode(response);
+   int code=0;
+   PushResponseParseResult parsed=ParseTopLevelBusinessCode(response,code);
+   if(parsed==PUSH_CODE_MISSING)
+     { g_push_status="响应缺少业务码"; g_push_warning=g_push_status; Print("PushPlus ",g_push_status); return false; }
+   if(parsed==PUSH_CODE_INVALID)
+     { g_push_status="响应业务码格式无效"; g_push_warning=g_push_status; Print("PushPlus ",g_push_status); return false; }
    if(code!=200)
-     { g_push_status="业务码 "+IntegerToString(code); Print("PushPlus ",g_push_status); return false; }
-   g_push_status="服务端已接收"; g_warning_status="";
+     { g_push_status="业务码 "+IntegerToString(code); g_push_warning=g_push_status;
+       Print("PushPlus ",g_push_status); return false; }
+   g_push_status="服务端已接收"; g_push_warning="";
    return true;
   }
 void EmitConfirmedReversal(const int previous_direction,const int direction,
@@ -277,7 +364,8 @@ void EmitConfirmedReversal(const int previous_direction,const int direction,
    if(InpEnableSound)
      {
       string file=direction==DIR_LONG ? InpLongSound : InpShortSound;
-      if(!PlaySound(file)) g_warning_status="声音播放失败："+file;
+      if(!PlaySound(file)) g_sound_warning="声音播放失败："+file;
+      else g_sound_warning="";
      }
    string title=BuildReversalTitle(previous_direction,direction);
    string content=BuildReversalContent(previous_direction,direction,s);
@@ -312,13 +400,21 @@ void RenderPanel()
    else SetLabel("VOTES",2,"EMA - | Supertrend - | RSI -",InpNeutralColor);
    string pending="候选：无";
    if(g_pending_direction!=DIR_NONE)
+     {
+      ulong hold_ms=(ulong)InpHoldSeconds*1000;
+      ulong remaining_ms=g_pending_elapsed_ms<hold_ms ? hold_ms-g_pending_elapsed_ms : 0;
       pending="候选："+DirectionText(g_pending_direction)+"，已保持 "+
-              DoubleToString((double)g_pending_elapsed_ms/1000.0,1)+" 秒";
+              DoubleToString((double)g_pending_elapsed_ms/1000.0,1)+" 秒，剩余 "+
+              DoubleToString((double)remaining_ms/1000.0,1)+" 秒";
+     }
    SetLabel("PENDING",3,pending,DirectionColor(g_pending_direction));
    SetLabel("PUSH",4,"PushPlus："+g_push_status,InpNeutralColor);
    SetLabel("STATUS",5,"状态："+g_status,InpNeutralColor);
-   SetLabel("WARN",6,"警告："+(g_warning_status=="" ? "无" : g_warning_status),
-            g_warning_status=="" ? InpNeutralColor : InpErrorColor);
+   string warnings="";
+   if(g_sound_warning!="") warnings=g_sound_warning;
+   if(g_push_warning!="") warnings+=(warnings=="" ? "" : " | ")+g_push_warning;
+   SetLabel("WARN",6,"警告："+(warnings=="" ? "无" : warnings),
+            warnings=="" ? InpNeutralColor : InpErrorColor);
    ChartRedraw(0);
   }
 bool IsNewTargetTick(MqlTick &tick)
@@ -343,7 +439,7 @@ int OnInit()
      { g_status="定时器创建失败"; RenderPanel(); return INIT_FAILED; }
    if(!InpEnablePushPlus) g_push_status="已关闭";
    else if(StringLen(InpPushPlusToken)==0) g_push_status="Token 未配置";
-   TryInitializeRuntime(); MaybeSendStartupTest(); RenderPanel();
+   TryInitializeRuntime(); RenderPanel();
    return INIT_SUCCEEDED;
   }
 void OnDeinit(const int reason)
@@ -351,7 +447,7 @@ void OnDeinit(const int reason)
 void OnTimer()
   {
    if(!g_runtime_ready)
-     { TryInitializeRuntime(); MaybeSendStartupTest(); RenderPanel(); if(!g_runtime_ready) return; }
+     { TryInitializeRuntime(); RenderPanel(); if(!g_runtime_ready) return; }
    MqlTick tick; if(!IsNewTargetTick(tick)) return;
    if(g_previous_server_tick_msc>0 &&
       tick.time_msc-g_previous_server_tick_msc>(long)InpReconnectResetSeconds*1000)
@@ -360,7 +456,9 @@ void OnTimer()
    SignalSnapshot s; if(!ReadLiveSignal(s)) { RenderPanel(); return; }
    g_snapshot=s; g_has_snapshot=true;
    int previous=g_confirmed_direction;
-   if(AdvanceReversalState(s.candidate,GetTickCount64()))
+   bool confirmed=AdvanceReversalState(s.candidate,GetTickCount64());
+   MaybeSendStartupTest();
+   if(confirmed)
      { g_status="已确认"+BuildReversalTitle(previous,g_confirmed_direction);
        EmitConfirmedReversal(previous,g_confirmed_direction,s); }
    else if(g_pending_direction!=DIR_NONE) g_status="反向候选防抖确认中";
