@@ -332,11 +332,13 @@ PushResponseParseResult ParseTopLevelBusinessCode(const string response,int &cod
    if(index>=length || StringGetCharacter(response,index)!='{') return PUSH_CODE_INVALID;
    index++;
    bool code_found=false;
+   bool expect_member=false;
    while(index<length)
      {
       SkipJsonWhitespace(response,index);
       if(index<length && StringGetCharacter(response,index)=='}')
         {
+         if(expect_member) return PUSH_CODE_INVALID;
          index++; SkipJsonWhitespace(response,index);
          if(index!=length) return PUSH_CODE_INVALID;
          return code_found ? PUSH_CODE_OK : PUSH_CODE_MISSING;
@@ -372,7 +374,8 @@ PushResponseParseResult ParseTopLevelBusinessCode(const string response,int &cod
         }
       else if(!SkipJsonValue(response,index)) return PUSH_CODE_INVALID;
       SkipJsonWhitespace(response,index);
-      if(index<length && StringGetCharacter(response,index)==',') { index++; continue; }
+      if(index<length && StringGetCharacter(response,index)==',')
+        { index++; expect_member=true; continue; }
       if(index<length && StringGetCharacter(response,index)=='}') continue;
       return PUSH_CODE_INVALID;
      }

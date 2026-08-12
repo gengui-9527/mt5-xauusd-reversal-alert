@@ -111,6 +111,7 @@ class PushPlusEaContractTests(unittest.TestCase):
         self.assertIn("code_found", self.source)
         self.assertIn("SkipJsonValue", self.source)
         self.assertIn("index!=length", self.source)
+        self.assertIn("expect_member", self.source)
         self.assertNotIn("ch=='+'", self.source)
 
     def test_sound_and_pushplus_warnings_have_separate_ownership(self):

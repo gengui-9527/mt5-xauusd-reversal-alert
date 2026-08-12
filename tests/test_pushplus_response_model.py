@@ -41,6 +41,7 @@ class PushPlusResponseModelTests(unittest.TestCase):
             '{"code":+200}',
             '{"code":200garbage}',
             '{"code":true}',
+            '{"code":200,}',
         )
         for response in cases:
             with self.subTest(response=response):
