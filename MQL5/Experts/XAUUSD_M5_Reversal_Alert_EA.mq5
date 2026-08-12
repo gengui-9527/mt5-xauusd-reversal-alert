@@ -452,15 +452,17 @@ void CenterLargeNotification()
    if(!ChartGetInteger(0,CHART_WIDTH_IN_PIXELS,0,chart_width) ||
       !ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS,0,chart_height))
       return;
-   int available_width=(int)MathMax(120,chart_width-20);
-   int available_height=(int)MathMax(120,chart_height-20);
+   int available_width=(int)MathMax(1,chart_width-4);
+   int available_height=(int)MathMax(1,chart_height-4);
    int box_width=(int)MathMin(560,available_width);
    int box_height=(int)MathMin(300,available_height);
-   g_large_font_size=(box_width<440 || box_height<260) ? 11 : 15;
-   g_large_title_font_size=(box_width<440 || box_height<260) ? 20 : 28;
-   int padding=(box_width<440 ? 16 : 30);
-   int title_top=(box_height<260 ? 18 : 28);
-   int body_top=(box_height<260 ? 68 : 92);
+   bool compact=(box_width<440 || box_height<260);
+   bool tiny=(box_width<260 || box_height<190);
+   g_large_font_size=tiny ? 8 : compact ? 11 : 15;
+   g_large_title_font_size=tiny ? 12 : compact ? 20 : 28;
+   int padding=tiny ? 5 : compact ? 16 : 30;
+   int title_top=tiny ? 4 : compact ? 18 : 28;
+   int body_top=tiny ? 34 : compact ? 60 : 82;
    int left=(int)MathMax(0,(chart_width-box_width)/2);
    int top=(int)MathMax(0,(chart_height-box_height)/2);
    string bg=LargeObjectName("LARGE_BG");
@@ -469,8 +471,10 @@ void CenterLargeNotification()
    PositionLargeObject("LARGE_BG",left,top);
    PositionLargeObject("LARGE_TITLE",left+padding,top+title_top);
    PositionLargeObject("LARGE_BODY",left+padding,top+body_top);
-   PositionLargeObject("LARGE_COUNTDOWN",left+padding,top+box_height-34);
-   PositionLargeObject("LARGE_CLOSE",left+box_width-42,top+8);
+   PositionLargeObject("LARGE_COUNTDOWN",left+padding,
+                       top+MathMax(body_top+40,box_height-(tiny ? 16 : 34)));
+   PositionLargeObject("LARGE_CLOSE",left+MathMax(0,box_width-(tiny ? 22 : 42)),
+                       top+(tiny ? 2 : 8));
    ObjectSetInteger(0,LargeObjectName("LARGE_TITLE"),OBJPROP_FONTSIZE,
                     g_large_title_font_size);
    ObjectSetInteger(0,LargeObjectName("LARGE_BODY"),OBJPROP_FONTSIZE,
@@ -514,8 +518,8 @@ void ShowLargeNotification(const int previous_direction,const int direction,
    CreateLargeLabel("LARGE_TITLE",g_symbol+" · M5  "+transition,28,accent);
    string body="服务器时间："+TimeToString(s.server_time,TIME_DATE|TIME_SECONDS)+
                "\nEMA："+DirectionText(s.ema_vote)+
-               "    Supertrend："+DirectionText(s.supertrend_vote)+
-               "    RSI："+DirectionText(s.rsi_vote)+
+               "\nSupertrend："+DirectionText(s.supertrend_vote)+
+               "\nRSI："+DirectionText(s.rsi_vote)+
                "\nPushPlus："+g_push_status;
    CreateLargeLabel("LARGE_BODY",body,15,clrWhite);
    CreateLargeLabel("LARGE_COUNTDOWN","",12,clrSilver);
