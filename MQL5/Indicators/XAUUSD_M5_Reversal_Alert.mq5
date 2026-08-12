@@ -49,11 +49,11 @@ struct SignalSnapshot
    datetime server_time;
   };
 
-const string PANEL_PREFIX = "XAU_M5_RA_";
-const int    COPY_BARS    = 200;
-
 string g_symbol = "";
 string g_status = "正在初始化";
+string g_warning_status = "";
+string g_panel_prefix = "";
+bool   g_runtime_ready = false;
 int    g_fast_ema_handle = INVALID_HANDLE;
 int    g_slow_ema_handle = INVALID_HANDLE;
 int    g_atr_handle      = INVALID_HANDLE;
@@ -149,6 +149,15 @@ bool ResolveTargetSymbol()
 
 bool CreateIndicatorHandles()
   {
+   if(g_fast_ema_handle != INVALID_HANDLE)
+      IndicatorRelease(g_fast_ema_handle);
+   if(g_slow_ema_handle != INVALID_HANDLE)
+      IndicatorRelease(g_slow_ema_handle);
+   if(g_atr_handle != INVALID_HANDLE)
+      IndicatorRelease(g_atr_handle);
+   if(g_rsi_handle != INVALID_HANDLE)
+      IndicatorRelease(g_rsi_handle);
+
    g_fast_ema_handle = iMA(g_symbol,PERIOD_M5,InpFastEmaPeriod,0,MODE_EMA,PRICE_CLOSE);
    g_slow_ema_handle = iMA(g_symbol,PERIOD_M5,InpSlowEmaPeriod,0,MODE_EMA,PRICE_CLOSE);
    g_atr_handle      = iATR(g_symbol,PERIOD_M5,InpAtrPeriod);
@@ -160,14 +169,40 @@ bool CreateIndicatorHandles()
       g_rsi_handle == INVALID_HANDLE)
      {
       g_status = "指标句柄创建失败，错误码 " + IntegerToString(GetLastError());
+      if(g_fast_ema_handle != INVALID_HANDLE)
+         IndicatorRelease(g_fast_ema_handle);
+      if(g_slow_ema_handle != INVALID_HANDLE)
+         IndicatorRelease(g_slow_ema_handle);
+      if(g_atr_handle != INVALID_HANDLE)
+         IndicatorRelease(g_atr_handle);
+      if(g_rsi_handle != INVALID_HANDLE)
+         IndicatorRelease(g_rsi_handle);
+      g_fast_ema_handle = INVALID_HANDLE;
+      g_slow_ema_handle = INVALID_HANDLE;
+      g_atr_handle = INVALID_HANDLE;
+      g_rsi_handle = INVALID_HANDLE;
       return false;
      }
    return true;
   }
 
+bool TryInitializeRuntime()
+  {
+   if(g_runtime_ready)
+      return true;
+   if(g_symbol == "" && !ResolveTargetSymbol())
+      return false;
+   if(!CreateIndicatorHandles())
+      return false;
+   g_runtime_ready = true;
+   g_status = "等待首个有效M5信号";
+   return true;
+  }
+
 void DeletePanel()
   {
-   ObjectsDeleteAll(0,PANEL_PREFIX);
+   if(g_panel_prefix != "")
+      ObjectsDeleteAll(0,g_panel_prefix);
   }
 
 void ReleaseResources()
@@ -185,7 +220,15 @@ void ReleaseResources()
    g_slow_ema_handle = INVALID_HANDLE;
    g_atr_handle      = INVALID_HANDLE;
    g_rsi_handle      = INVALID_HANDLE;
+   g_runtime_ready   = false;
    DeletePanel();
+  }
+
+int RequiredHistoryBars()
+  {
+   int longest_period = MathMax(InpSlowEmaPeriod,
+                                MathMax(InpAtrPeriod,InpRsiPeriod));
+   return MathMax(200,longest_period*10);
   }
 
 int MajorityVote(const int ema_vote,const int supertrend_vote,const int rsi_vote)
@@ -260,10 +303,11 @@ bool CalculateSupertrendVote(const MqlRates &rates[],
 
 bool ReadLiveSignal(SignalSnapshot &snapshot)
   {
-   if(BarsCalculated(g_fast_ema_handle) < COPY_BARS ||
-      BarsCalculated(g_slow_ema_handle) < COPY_BARS ||
-      BarsCalculated(g_atr_handle) < COPY_BARS ||
-      BarsCalculated(g_rsi_handle) < COPY_BARS)
+   int history_bars = RequiredHistoryBars();
+   if(BarsCalculated(g_fast_ema_handle) < history_bars ||
+      BarsCalculated(g_slow_ema_handle) < history_bars ||
+      BarsCalculated(g_atr_handle) < history_bars ||
+      BarsCalculated(g_rsi_handle) < history_bars)
      {
       g_status = "等待M5历史数据";
       return false;
@@ -280,13 +324,13 @@ bool ReadLiveSignal(SignalSnapshot &snapshot)
    ArraySetAsSeries(slow_ema,false);
    ArraySetAsSeries(rsi,false);
 
-   int rate_count = CopyRates(g_symbol,PERIOD_M5,0,COPY_BARS,rates);
-   int atr_count = CopyBuffer(g_atr_handle,0,0,COPY_BARS,atr);
+   int rate_count = CopyRates(g_symbol,PERIOD_M5,0,history_bars,rates);
+   int atr_count = CopyBuffer(g_atr_handle,0,0,history_bars,atr);
    int fast_count = CopyBuffer(g_fast_ema_handle,0,0,1,fast_ema);
    int slow_count = CopyBuffer(g_slow_ema_handle,0,0,1,slow_ema);
    int rsi_count = CopyBuffer(g_rsi_handle,0,0,1,rsi);
 
-   if(rate_count != COPY_BARS || atr_count != COPY_BARS ||
+   if(rate_count != history_bars || atr_count != history_bars ||
       fast_count != 1 || slow_count != 1 || rsi_count != 1)
      {
       g_status = "M5数据复制未完成";
@@ -295,7 +339,7 @@ bool ReadLiveSignal(SignalSnapshot &snapshot)
 
    int supertrend_vote = DIR_NONE;
    double supertrend_line = 0.0;
-   if(!CalculateSupertrendVote(rates,atr,COPY_BARS,supertrend_vote,supertrend_line))
+   if(!CalculateSupertrendVote(rates,atr,history_bars,supertrend_vote,supertrend_line))
      {
       g_status = "Supertrend计算失败";
       return false;
@@ -311,7 +355,7 @@ bool ReadLiveSignal(SignalSnapshot &snapshot)
    snapshot.fast_ema = fast_ema[0];
    snapshot.slow_ema = slow_ema[0];
    snapshot.rsi = rsi[0];
-   snapshot.close = rates[COPY_BARS-1].close;
+   snapshot.close = rates[history_bars-1].close;
    snapshot.supertrend_line = supertrend_line;
    snapshot.ema_vote = CompareValues(snapshot.fast_ema,snapshot.slow_ema);
    snapshot.supertrend_vote = supertrend_vote;
@@ -381,8 +425,10 @@ void EmitReversalAlert(const int direction,const datetime server_time)
       string sound_file = direction == DIR_LONG ? InpLongSound : InpShortSound;
       ResetLastError();
       if(!PlaySound(sound_file))
-         g_status = "声音播放失败：" + sound_file +
-                    "（错误码 " + IntegerToString(GetLastError()) + "）";
+         g_warning_status = "声音播放失败：" + sound_file +
+                            "（错误码 " + IntegerToString(GetLastError()) + "）";
+      else
+         g_warning_status = "";
      }
 
    if(InpEnablePopup)
@@ -392,7 +438,7 @@ void EmitReversalAlert(const int direction,const datetime server_time)
 
 void EnsureLabel(const string suffix,const int row)
   {
-   string name = PANEL_PREFIX + suffix;
+   string name = g_panel_prefix + suffix;
    if(ObjectFind(0,name) >= 0)
       return;
    ObjectCreate(0,name,OBJ_LABEL,0,0,0);
@@ -408,7 +454,7 @@ void EnsureLabel(const string suffix,const int row)
 void SetLabel(const string suffix,const int row,const string text,const color text_color)
   {
    EnsureLabel(suffix,row);
-   string name = PANEL_PREFIX + suffix;
+   string name = g_panel_prefix + suffix;
    ObjectSetString(0,name,OBJPROP_TEXT,text);
    ObjectSetInteger(0,name,OBJPROP_COLOR,text_color);
   }
@@ -451,6 +497,10 @@ void RenderPanel()
                    StringFind(g_status,"错误") >= 0 ||
                    StringFind(g_status,"找不到") >= 0;
    SetLabel("STATUS",4,"状态：" + g_status,is_error ? InpErrorColor : InpNeutralColor);
+   if(g_warning_status != "")
+      SetLabel("WARNING",5,"警告：" + g_warning_status,InpErrorColor);
+   else
+      SetLabel("WARNING",5,"警告：无",InpNeutralColor);
    ChartRedraw(0);
   }
 
@@ -475,21 +525,13 @@ bool IsNewTargetTick(MqlTick &tick)
 
 int OnInit()
   {
+   g_panel_prefix = "XAU_M5_RA_" +
+                    IntegerToString((long)ChartID()) + "_" +
+                    IntegerToString((long)GetMicrosecondCount()) + "_";
    if(!ValidateInputs())
      {
       RenderPanel();
       return INIT_PARAMETERS_INCORRECT;
-     }
-   if(!ResolveTargetSymbol())
-     {
-      RenderPanel();
-      return INIT_FAILED;
-     }
-   if(!CreateIndicatorHandles())
-     {
-      ReleaseResources();
-      RenderPanel();
-      return INIT_FAILED;
      }
    if(!EventSetMillisecondTimer(InpTimerMilliseconds))
      {
@@ -500,7 +542,7 @@ int OnInit()
      }
 
    IndicatorSetString(INDICATOR_SHORTNAME,"XAUUSD M5 Reversal Alert");
-   g_status = "等待首个有效M5信号";
+   TryInitializeRuntime();
    RenderPanel();
    return INIT_SUCCEEDED;
   }
@@ -526,10 +568,12 @@ int OnCalculate(const int rates_total,
 
 void OnTimer()
   {
-   if(g_symbol == "")
+   if(!g_runtime_ready)
      {
+      TryInitializeRuntime();
       RenderPanel();
-      return;
+      if(!g_runtime_ready)
+         return;
      }
 
    MqlTick target_tick;

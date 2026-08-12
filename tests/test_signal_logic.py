@@ -1,5 +1,6 @@
 import unittest
 from dataclasses import dataclass
+from itertools import product
 
 
 def majority_vote(*votes: int) -> int:
@@ -19,6 +20,14 @@ class SignalLogicTests(unittest.TestCase):
         self.assertEqual(majority_vote(1, -1, 0), 0)
         self.assertEqual(majority_vote(0, 1, 1), 1)
         self.assertEqual(majority_vote(0, -1, -1), -1)
+
+    def test_all_twenty_seven_vote_combinations(self):
+        for votes in product((-1, 0, 1), repeat=3):
+            long_count = votes.count(1)
+            short_count = votes.count(-1)
+            expected = 1 if long_count >= 2 else -1 if short_count >= 2 else 0
+            with self.subTest(votes=votes):
+                self.assertEqual(majority_vote(*votes), expected)
 
 
 @dataclass(frozen=True)
@@ -110,6 +119,12 @@ class ReversalStateTests(unittest.TestCase):
         self.assertFalse(alert)
         self.assertEqual(state.pending, 0)
         self.assertEqual(state.pending_elapsed_ms, 0)
+
+    def test_reconnect_reset_establishes_new_silent_baseline(self):
+        reset_state = State()
+        state, alert = advance(reset_state, -1, 80_000, 10_000, 1_000)
+        self.assertFalse(alert)
+        self.assertEqual(state.confirmed, -1)
 
 
 if __name__ == "__main__":

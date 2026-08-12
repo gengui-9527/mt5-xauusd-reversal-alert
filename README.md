@@ -28,6 +28,11 @@
 
 本指标不使用交易函数，因此不需要开启“算法交易”来发送订单。
 
+项目同时提供已编译的 `XAUUSD_M5_Reversal_Alert.ex5`，可直接复制到
+`MQL5\Indicators`。本次构建使用 MetaEditor 5.0.0.6104，结果为
+`0 errors, 0 warnings`；源码和 EX5 的 SHA-256 记录在
+`verification\build-provenance.txt`。
+
 ## 品种名称
 
 默认目标为 `XAUUSD`。如果经纪商使用 `XAUUSDm`、`XAUUSD.a` 等前后缀，指标会先尝试精确名称，再自动搜索名称中包含 `XAUUSD` 的品种。状态面板会显示最终实际监控的名称。
@@ -76,5 +81,7 @@
 
 - `MQL5/Indicators/XAUUSD_M5_Reversal_Alert.mq5`：指标源码。
 - `tests/test_signal_logic.py`：多数投票和防抖状态机的可重复参考测试。
+- `tests/test_mql_contract.py`：关键 MQL5 运行契约的静态防回归检查。
+- `verification/build-provenance.txt`：编译结果和源码/EX5 哈希。
 - `docs/superpowers/specs/2026-08-12-xauusd-m5-reversal-alert-design.md`：已批准设计。
 - `docs/superpowers/plans/2026-08-12-xauusd-m5-reversal-alert.md`：实施计划。
