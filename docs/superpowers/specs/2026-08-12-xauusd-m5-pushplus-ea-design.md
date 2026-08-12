@@ -2,7 +2,7 @@
 
 ## 目标
 
-新增一个 MetaTrader 5 智能交易程序（EA），固定监控黄金品种的 M5 盘中行情。市场多空方向连续确认 10 秒后，同时发出 MT5 声音、弹窗和 PushPlus 微信提醒。
+新增一个 MetaTrader 5 智能交易程序（EA），固定监控黄金品种的 M5 盘中行情。市场多空方向连续确认 10 秒后，同时发出 MT5 声音、弹窗和 PushPlus App 有声提醒。
 
 EA 只负责监控与提醒，不执行开仓、平仓、改单或任何其他交易操作。
 
@@ -41,7 +41,7 @@ EA 可加载在任意图表，但始终读取目标黄金品种的 `PERIOD_M5` �
 
 1. 播放对应 MT5 声音。
 2. 显示 MT5 Alert 弹窗。
-3. 向 PushPlus 发送一条微信渠道消息。
+3. 向 PushPlus 发送一条 App 渠道消息。
 
 声音、弹窗和 PushPlus 各自提供独立开关。某一种提醒失败不阻断其他提醒，也不影响后续行情监控。
 
@@ -54,7 +54,7 @@ PushPlus 请求失败不会导致同一已确认转换被重复发送。下一�
 - API 地址：`https://www.pushplus.plus/send`
 - 请求方法：HTTPS POST
 - 内容类型：`application/json; charset=utf-8`
-- 渠道：`wechat`
+- 渠道：`app`
 - 模板：`txt`
 - 请求超时：5000 毫秒
 
@@ -120,7 +120,7 @@ EA 将 HTTP 200 与 PushPlus JSON 业务响应分别校验。
 - `WebRequest()` 返回 HTTP 200；
 - 响应 JSON 中的业务 `code` 表示接收成功。
 
-PushPlus 采用异步发送；成功只表示服务端接收请求，不保证微信最终送达。
+PushPlus 采用异步发送；成功只表示服务端接收请求，不保证 PushPlus App 最终送达。
 
 错误类别：
 
@@ -164,8 +164,12 @@ EA 在图表左上角显示：
 4. 将 EA 加载到任意图表。
 5. 在参数中填写 PushPlus Token。
 6. 开启“算法交易”，以允许 EA 运行。
+7. 手机安装 PushPlus App，登录 Token 所属的同一账号，并允许系统通知和通知声音。
 
 开启算法交易不代表本 EA 会交易；源码中不得导入交易库或调用交易 API。
+
+PushPlus App 一个账号同时只能登录一台 App 设备；在另一台设备登录会使原设备退出。
+只有 `channel=app` 的消息才直接触发 App 通知，本 EA 默认不发送 `wechat` 微信公众号渠道。
 
 ## 验证
 
@@ -194,7 +198,7 @@ EA 在图表左上角显示：
 
 - 只有用户明确提供 Token 并授权真实外部发送后才执行；
 - 默认不使用用户 Token 发测试消息；
-- 最终仍需在用户 MT5 终端验证 WebRequest 白名单、微信绑定和手机最终送达。
+- 最终仍需在用户 MT5 终端验证 WebRequest 白名单、PushPlus App 登录、系统通知权限、通知声音和手机最终送达。
 
 ## 交付
 
@@ -211,5 +215,6 @@ EA 在图表左上角显示：
 - 自动交易或订单管理；
 - 对失败的 PushPlus 消息持续重试；
 - 向除已配置 PushPlus Token 之外的人员或群组发送；
-- 承诺 PushPlus 服务端接收后一定能送达微信；
+- 向微信公众号 `wechat` 渠道发送；
+- 承诺 PushPlus 服务端接收后一定能送达 PushPlus App；
 - 将 Token 写入任何版本控制文件。
