@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build and deliver a non-trading MT5 EA that reproduces the approved XAUUSD M5 reversal signal and sends one PushPlus WeChat message per confirmed reversal.
+**Goal:** Build and deliver a non-trading MT5 EA that reproduces the approved XAUUSD M5 reversal signal and sends one audible PushPlus App notification per confirmed reversal.
 
 **Architecture:** Adapt the verified indicator signal/state implementation into an EA event lifecycle, then add a separate PushPlus transport boundary using synchronous `WebRequest()` from the EA timer thread. Keep secrets exclusively in runtime inputs, validate message construction with Python contract tests, compile with MetaEditor, and preserve the existing indicator.
 
@@ -14,7 +14,8 @@
 - Use EMA 9/21, Supertrend ATR 10 × 3.0, RSI 14/50, two-of-three voting, and 10 seconds of active-tick confirmation by default.
 - Startup and reconnect establish a silent baseline.
 - Send PushPlus only for confirmed reversals, never for runtime status changes.
-- PushPlus defaults: `https://www.pushplus.plus/send`, `wechat`, `txt`, 5000 ms.
+- PushPlus defaults: `https://www.pushplus.plus/send`, `app`, `txt`, 5000 ms.
+- The default runtime path sends only to the PushPlus App channel and does not send to the `wechat` channel.
 - The Token defaults to empty and must never appear in source, docs, logs, panel text, committed fixtures, or URLs.
 - No trading libraries or order APIs.
 - Preserve the existing indicator source and EX5.
@@ -145,11 +146,11 @@ git commit -m "feat: send confirmed reversals through PushPlus"
 
 - [ ] **Step 1: Add EA installation instructions**
 
-Document copying EX5 to `MQL5\Experts`, adding `https://www.pushplus.plus` under Tools → Options → Expert Advisors, entering the Token, enabling Algo Trading, and confirming that no trading code exists.
+Document copying EX5 to `MQL5\Experts`, adding `https://www.pushplus.plus` under Tools → Options → Expert Advisors, entering the Token, enabling Algo Trading, installing and logging in to the PushPlus App on one phone, enabling App notification sound, and confirming that no trading code exists.
 
 - [ ] **Step 2: Add PushPlus status and failure guidance**
 
-Explain empty Token, error 4014/URL whitelist, HTTP failure, business failure, async acceptance versus final WeChat delivery, and that changing settings requires reloading the EA.
+Explain empty Token, error 4014/URL whitelist, HTTP failure, business failure, async acceptance versus final App delivery, single-device App login, and that changing settings requires reloading the EA.
 
 - [ ] **Step 3: Document privacy and test-message behavior**
 
@@ -203,3 +204,7 @@ git commit -m "chore: verify PushPlus alert EA"
 - [ ] **Step 6: Copy the verified EX5 to the desktop**
 
 Copy to `C:\Users\Administrator\Desktop\XAUUSD_M5_Reversal_Alert_EA.ex5`, compare SHA-256 with the repository EX5, and leave the existing indicator EX5 untouched.
+
+- [ ] **Step 7: Send an explicitly authorized App-channel test**
+
+Use the user-provided Token only in process memory to POST a connection test with `channel=app`. Print only the sanitized PushPlus business code, message, and request ID, never the Token or request body. Confirm the user receives the PushPlus App notification with system sound.
