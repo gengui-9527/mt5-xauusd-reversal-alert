@@ -25,6 +25,25 @@ class ConfirmationState:
     has_last_tick: bool = False
 
 
+@dataclass(frozen=True)
+class Bar:
+    time: int
+    open: float
+    high: float
+    low: float
+    close: float
+    atr: float
+
+
+@dataclass(frozen=True)
+class SupertrendState:
+    final_upper: float
+    final_lower: float
+    long_trend: bool
+    previous_close: float
+    committed_time: int
+
+
 def _require_finite(*values: float) -> None:
     if not all(math.isfinite(value) for value in values):
         raise ValueError("score inputs must be finite")
@@ -82,6 +101,72 @@ def composite_score(
     rsi_component = rsi_score(rsi)
     total = max(-100.0, min(100.0, ema + supertrend + rsi_component))
     return ScoreSnapshot(ema, supertrend, rsi_component, total)
+
+
+def _next_supertrend(
+    previous: SupertrendState | None,
+    bar: Bar,
+    *,
+    committed_time: int,
+    multiplier: float = 2.4,
+) -> tuple[SupertrendState, float]:
+    _require_finite(bar.open, bar.high, bar.low, bar.close, multiplier)
+    _require_positive_atr(bar.atr)
+    midpoint = (bar.high + bar.low) / 2.0
+    basic_upper = midpoint + multiplier * bar.atr
+    basic_lower = midpoint - multiplier * bar.atr
+
+    if previous is None:
+        final_upper = basic_upper
+        final_lower = basic_lower
+        long_trend = bar.close >= midpoint
+    else:
+        final_upper = (
+            previous.final_upper
+            if basic_upper >= previous.final_upper
+            and previous.previous_close <= previous.final_upper
+            else basic_upper
+        )
+        final_lower = (
+            previous.final_lower
+            if basic_lower <= previous.final_lower
+            and previous.previous_close >= previous.final_lower
+            else basic_lower
+        )
+        long_trend = previous.long_trend
+        if long_trend and bar.close < final_lower:
+            long_trend = False
+        elif not long_trend and bar.close > final_upper:
+            long_trend = True
+
+    state = SupertrendState(
+        final_upper, final_lower, long_trend, bar.close, committed_time
+    )
+    return state, final_lower if long_trend else final_upper
+
+
+def advance_supertrend(
+    state: SupertrendState | None,
+    bar: Bar,
+    *,
+    multiplier: float = 2.4,
+) -> tuple[SupertrendState, float]:
+    if state is not None and bar.time <= state.committed_time:
+        raise ValueError("bar time must advance beyond committed time")
+    return _next_supertrend(state, bar, committed_time=bar.time, multiplier=multiplier)
+
+
+def preview_supertrend(
+    state: SupertrendState,
+    current_bar: Bar,
+    *,
+    multiplier: float = 2.4,
+) -> tuple[SupertrendState, float]:
+    if current_bar.time <= state.committed_time:
+        raise ValueError("preview time must be newer than committed time")
+    return _next_supertrend(
+        state, current_bar, committed_time=state.committed_time, multiplier=multiplier
+    )
 
 
 def required_seconds(score: float) -> float:
