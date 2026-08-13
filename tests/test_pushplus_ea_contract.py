@@ -16,6 +16,20 @@ class PushPlusEaContractTests(unittest.TestCase):
     def setUpClass(cls):
         cls.source = EA_PATH.read_text(encoding="utf-8")
 
+    @classmethod
+    def function_source(cls, signature):
+        start = cls.source.index(signature)
+        brace = cls.source.index("{", start)
+        depth = 0
+        for index in range(brace, len(cls.source)):
+            if cls.source[index] == "{":
+                depth += 1
+            elif cls.source[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return cls.source[start:index + 1]
+        raise AssertionError(f"unterminated function: {signature}")
+
     def test_is_an_ea_with_timer_not_an_indicator(self):
         self.assertIn("#property strict", self.source)
         self.assertIn("int OnInit()", self.source)
@@ -89,8 +103,10 @@ class PushPlusEaContractTests(unittest.TestCase):
 
     def test_startup_test_waits_for_live_snapshot_and_baseline(self):
         timer = self.source[self.source.index("void OnTimer()") :]
-        read_pos = timer.index("ReadLiveSignal")
-        baseline_pos = timer.index("AdvanceReversalState")
+        self.assertIn("ReadAdaptiveSignal", timer)
+        self.assertIn("AdvanceAdaptiveState", timer)
+        read_pos = timer.index("ReadAdaptiveSignal")
+        baseline_pos = timer.index("AdvanceAdaptiveState")
         startup_pos = timer.index("MaybeSendStartupTest")
         self.assertLess(read_pos, startup_pos)
         self.assertLess(baseline_pos, startup_pos)
@@ -125,8 +141,195 @@ class PushPlusEaContractTests(unittest.TestCase):
         self.assertNotIn("g_sound_warning=", send)
 
     def test_panel_displays_remaining_confirmation_time(self):
-        self.assertIn("remaining_ms", self.source)
+        self.assertIn("remaining_seconds", self.source)
         self.assertIn("剩余", self.source)
+
+    def test_adaptive_inputs_have_approved_defaults(self):
+        for text in (
+            "input int InpFastEmaPeriod = 7;",
+            "input int InpSlowEmaPeriod = 18;",
+            "input int InpAtrPeriod = 8;",
+            "input double InpSupertrendMultiplier = 2.4;",
+            "input int InpRsiPeriod = 9;",
+            "input double InpRsiNeutralLower = 48.0;",
+            "input double InpRsiNeutralUpper = 52.0;",
+            "input double InpCandidateEntryScore = 55.0;",
+            "input double InpDirectionMaintenanceScore = 35.0;",
+            "input double InpMinimumConfirmationSeconds = 3.0;",
+            "input double InpMaximumConfirmationSeconds = 10.0;",
+            "input double InpEmaDistanceWeight = 25.0;",
+            "input double InpEmaSlopeWeight = 10.0;",
+            "input double InpSupertrendWeight = 40.0;",
+            "input double InpRsiWeight = 25.0;",
+            "input double InpEmaDistanceAtrScale = 0.20;",
+            "input double InpEmaSlopeAtrScale = 0.08;",
+            "input double InpSupertrendAtrScale = 0.50;",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, self.source)
+
+    def test_adaptive_runtime_exposes_required_interfaces_and_snapshot(self):
+        for signature in (
+            "double ClampUnit(const double value)",
+            "bool InitializeSupertrendCache()",
+            "bool PreviewCurrentSupertrend(const MqlRates &bar,const double atr,double &line)",
+            "bool ReadAdaptiveSignal(ScoreSnapshot &snapshot)",
+            "double RequiredConfirmationSeconds(const double score)",
+            "bool AdvanceAdaptiveState(const double score,const ulong now_ms)",
+        ):
+            with self.subTest(signature=signature):
+                self.assertIn(signature, self.source)
+        self.assertIn("struct ScoreSnapshot", self.source)
+        snapshot = self.source[
+            self.source.index("struct ScoreSnapshot"):
+            self.source.index("};", self.source.index("struct ScoreSnapshot")) + 2
+        ]
+        for field in (
+            "ema_score",
+            "supertrend_score",
+            "rsi_score",
+            "total_score",
+            "required_seconds",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(field, snapshot)
+
+    def test_adaptive_validation_is_bounded_finite_and_keeps_ea_loaded(self):
+        validate = self.function_source("bool ValidateInputs()")
+        for text in (
+            "MAX_INDICATOR_PERIOD",
+            "InpFastEmaPeriod>=InpSlowEmaPeriod",
+            "MathIsValidNumber",
+            "MathAbs(weight_sum-100.0)>1e-6",
+            "InpRsiNeutralLower>=50.0",
+            "InpRsiNeutralUpper<=50.0",
+            "InpDirectionMaintenanceScore>=InpCandidateEntryScore",
+            "InpCandidateEntryScore>100.0",
+            "InpMinimumConfirmationSeconds>InpMaximumConfirmationSeconds",
+            "参数错误：EMA周期",
+            "参数错误：Supertrend参数",
+            "参数错误：RSI参数",
+            "参数错误：评分权重",
+            "参数错误：评分阈值",
+            "参数错误：确认时间",
+            "参数错误：标准化尺度",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, validate)
+        init = self.function_source("int OnInit()")
+        self.assertIn("g_inputs_valid=ValidateInputs();", init)
+        self.assertNotIn("INIT_PARAMETERS_INCORRECT", init)
+        self.assertIn("return INIT_SUCCEEDED;", init)
+
+    def test_scoring_uses_exact_formulas_and_rejects_nonfinite_data(self):
+        self.assertIn("bool ReadAdaptiveSignal(ScoreSnapshot &snapshot)", self.source)
+        scoring = self.function_source("bool ReadAdaptiveSignal(ScoreSnapshot &snapshot)")
+        for text in (
+            "MathIsValidNumber",
+            "atr[0]<=0.0",
+            "(fast[0]-slow[0])/(InpEmaDistanceAtrScale*atr[0])",
+            "(fast[0]-fast[1])/(InpEmaSlopeAtrScale*atr[0])",
+            "(price-supertrend_line)/(InpSupertrendAtrScale*atr[0])",
+            "(rsi[0]-InpRsiNeutralUpper)/8.0",
+            "(rsi[0]-InpRsiNeutralLower)/8.0",
+            "MathMax(-100.0,MathMin(100.0",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, scoring)
+
+    def test_read_adaptive_signal_does_not_replay_full_history_per_tick(self):
+        self.assertIn("bool ReadAdaptiveSignal(ScoreSnapshot &snapshot)", self.source)
+        scoring = self.function_source("bool ReadAdaptiveSignal(ScoreSnapshot &snapshot)")
+        self.assertNotIn("RequiredHistoryBars()", scoring)
+        self.assertNotRegex(scoring, r"CopyRates\s*\([^;]*\bcount\b")
+        self.assertNotRegex(scoring, r"\bfor\s*\(")
+        self.assertIn("CopyRates(g_symbol,PERIOD_M5,0,2", scoring)
+
+    def test_supertrend_history_is_bounded_and_preview_does_not_mutate_cache(self):
+        required = self.function_source("int RequiredHistoryBars()")
+        self.assertIn("MAX_HISTORY_BARS", required)
+        self.assertIn("InpAtrPeriod>MAX_HISTORY_BARS/10", required)
+        self.assertIn("bool InitializeSupertrendCache()", self.source)
+        initialize = self.function_source("bool InitializeSupertrendCache()")
+        self.assertIn("CopyRates(g_symbol,PERIOD_M5,1,count", initialize)
+        self.assertIn("CopyBuffer(g_atr_handle,0,1,count", initialize)
+        self.assertIn(
+            "bool PreviewCurrentSupertrend(const MqlRates &bar,const double atr,double &line)",
+            self.source,
+        )
+        preview = self.function_source(
+            "bool PreviewCurrentSupertrend(const MqlRates &bar,const double atr,double &line)"
+        )
+        for cached_name in (
+            "g_st_final_upper=",
+            "g_st_final_lower=",
+            "g_st_long_trend=",
+            "g_st_previous_close=",
+            "g_st_committed_time=",
+        ):
+            with self.subTest(cached_name=cached_name):
+                self.assertNotIn(cached_name, preview)
+
+    def test_supertrend_rebuilds_silently_on_reconnect_and_history_change(self):
+        synchronize = self.function_source("bool SynchronizeSupertrendCache(")
+        for text in (
+            "current_bar.time<g_st_active_time",
+            "previous_bar.time!=g_st_committed_time",
+            "previous_bar.open!=g_st_committed_open",
+            "previous_bar.high!=g_st_committed_high",
+            "previous_bar.low!=g_st_committed_low",
+            "previous_bar.close!=g_st_previous_close",
+            "previous_atr!=g_st_committed_atr",
+            "return InitializeSupertrendCache();",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, synchronize)
+        initialize = self.function_source("bool InitializeSupertrendCache()")
+        self.assertIn("ResetSignalState();", initialize)
+        timer = self.function_source("void OnTimer()")
+        self.assertIn("tick.time_msc<g_previous_server_tick_msc", timer)
+        self.assertIn("g_st_cache_ready=false;", timer)
+
+    def test_runtime_cache_retry_preserves_calculating_indicator_handles(self):
+        initialize = self.function_source("bool TryInitializeRuntime()")
+        self.assertIn("g_atr_handle==INVALID_HANDLE", initialize)
+        self.assertIn("if(!InitializeSupertrendCache()) return false;", initialize)
+        self.assertNotIn(
+            "if(!InitializeSupertrendCache()) { ReleaseHandles(); return false; }",
+            initialize,
+        )
+
+    def test_first_cache_sync_does_not_commit_the_completed_bar_twice(self):
+        synchronize = self.function_source("bool SynchronizeSupertrendCache(")
+        baseline = (
+            "g_st_active_time=current_bar.time;\n"
+            "      return true;"
+        )
+        self.assertIn(baseline, synchronize)
+
+    def test_adaptive_confirmation_uses_progress_and_explicit_timestamp_validity(self):
+        self.assertIn(
+            "bool AdvanceAdaptiveState(const double score,const ulong now_ms)",
+            self.source,
+        )
+        state = self.function_source(
+            "bool AdvanceAdaptiveState(const double score,const ulong now_ms)"
+        )
+        for text in (
+            "g_confirmation_progress",
+            "g_has_last_confirmation_tick",
+            "RequiredConfirmationSeconds(score)",
+            "active_seconds/InpMaximumConfirmationSeconds*0.5",
+            "active_seconds/InpMaximumConfirmationSeconds",
+            "g_confirmation_progress>=1.0",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, state)
+        self.assertNotRegex(
+            state,
+            r"g_last_confirmation_tick_ms\s*(?:==|!=)\s*0",
+        )
+        self.assertIn("g_has_last_confirmation_tick=true;", state)
 
     def test_large_notification_contract(self):
         for required in (

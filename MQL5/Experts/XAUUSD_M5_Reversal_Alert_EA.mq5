@@ -12,13 +12,24 @@ enum PushResponseParseResult
   };
 
 input string InpSymbol = "XAUUSD";
-input int InpFastEmaPeriod = 9;
-input int InpSlowEmaPeriod = 21;
-input int InpAtrPeriod = 10;
-input double InpSupertrendMultiplier = 3.0;
-input int InpRsiPeriod = 14;
-input double InpRsiMidpoint = 50.0;
-input int InpHoldSeconds = 10;
+input int InpFastEmaPeriod = 7;
+input int InpSlowEmaPeriod = 18;
+input int InpAtrPeriod = 8;
+input double InpSupertrendMultiplier = 2.4;
+input int InpRsiPeriod = 9;
+input double InpRsiNeutralLower = 48.0;
+input double InpRsiNeutralUpper = 52.0;
+input double InpCandidateEntryScore = 55.0;
+input double InpDirectionMaintenanceScore = 35.0;
+input double InpMinimumConfirmationSeconds = 3.0;
+input double InpMaximumConfirmationSeconds = 10.0;
+input double InpEmaDistanceWeight = 25.0;
+input double InpEmaSlopeWeight = 10.0;
+input double InpSupertrendWeight = 40.0;
+input double InpRsiWeight = 25.0;
+input double InpEmaDistanceAtrScale = 0.20;
+input double InpEmaSlopeAtrScale = 0.08;
+input double InpSupertrendAtrScale = 0.50;
 input int InpTimerMilliseconds = 100;
 input int InpMaximumActiveTickGapMs = 1000;
 input int InpReconnectResetSeconds = 60;
@@ -43,9 +54,9 @@ input color InpShortColor = clrTomato;
 input color InpNeutralColor = clrSilver;
 input color InpErrorColor = clrOrangeRed;
 
-struct SignalSnapshot
+struct ScoreSnapshot
   {
-   int ema_vote,supertrend_vote,rsi_vote,candidate;
+   double ema_score,supertrend_score,rsi_score,total_score,required_seconds;
    double fast_ema,slow_ema,supertrend_line,rsi,close;
    long tick_time_msc;
    datetime server_time;
@@ -56,18 +67,26 @@ const int MAX_HISTORY_BARS=5000;
 string g_symbol="",g_status="正在初始化",g_push_status="未发送";
 string g_sound_warning="",g_push_warning="";
 string g_panel_prefix="";
-bool g_runtime_ready=false,g_has_snapshot=false,g_startup_test_attempted=false;
+bool g_inputs_valid=false,g_runtime_ready=false,g_has_snapshot=false;
+bool g_startup_test_attempted=false;
 int g_fast_ema_handle=INVALID_HANDLE,g_slow_ema_handle=INVALID_HANDLE;
 int g_atr_handle=INVALID_HANDLE,g_rsi_handle=INVALID_HANDLE;
 int g_confirmed_direction=DIR_NONE,g_pending_direction=DIR_NONE;
-ulong g_pending_elapsed_ms=0,g_last_pending_tick_ms=0;
+double g_confirmation_progress=0.0,g_pending_required_seconds=0.0;
+ulong g_last_confirmation_tick_ms=0;
+bool g_has_last_confirmation_tick=false;
+bool g_st_cache_ready=false,g_st_long_trend=false;
+double g_st_final_upper=0.0,g_st_final_lower=0.0,g_st_previous_close=0.0;
+double g_st_committed_open=0.0,g_st_committed_high=0.0;
+double g_st_committed_low=0.0,g_st_committed_atr=0.0;
+datetime g_st_committed_time=0,g_st_active_time=0;
 long g_last_tick_time_msc=0,g_previous_server_tick_msc=0;
 double g_last_tick_bid=0.0,g_last_tick_ask=0.0;
 bool g_large_visible=false;
 ulong g_large_hide_at_ms=0;
 int g_large_font_size=15;
 int g_large_title_font_size=28;
-SignalSnapshot g_snapshot;
+ScoreSnapshot g_snapshot;
 
 string DirectionText(const int direction)
   {
@@ -84,19 +103,50 @@ color DirectionColor(const int direction)
 bool ValidateInputs()
   {
    if(StringLen(InpSymbol)==0) { g_status="参数错误：品种名为空"; return false; }
-   if(InpFastEmaPeriod<=0 || InpSlowEmaPeriod<=InpFastEmaPeriod ||
+   if(InpFastEmaPeriod<1 || InpSlowEmaPeriod<1 ||
+      InpFastEmaPeriod>=InpSlowEmaPeriod ||
       InpFastEmaPeriod>MAX_INDICATOR_PERIOD || InpSlowEmaPeriod>MAX_INDICATOR_PERIOD)
-     { g_status="参数错误：EMA周期无效"; return false; }
-   if(InpAtrPeriod<=0 || InpAtrPeriod>MAX_INDICATOR_PERIOD ||
-      InpSupertrendMultiplier<=0.0)
-     { g_status="参数错误：Supertrend参数无效"; return false; }
-   if(InpRsiPeriod<=0 || InpRsiPeriod>MAX_INDICATOR_PERIOD ||
-      InpRsiMidpoint<=0.0 || InpRsiMidpoint>=100.0)
-     { g_status="参数错误：RSI参数无效"; return false; }
-   if(InpHoldSeconds<=0 || InpTimerMilliseconds<50 ||
+     { g_status="参数错误：EMA周期"; return false; }
+   if(InpAtrPeriod<1 || InpAtrPeriod>MAX_INDICATOR_PERIOD ||
+      !MathIsValidNumber(InpSupertrendMultiplier) || InpSupertrendMultiplier<=0.0)
+     { g_status="参数错误：Supertrend参数"; return false; }
+   if(InpRsiPeriod<1 || InpRsiPeriod>MAX_INDICATOR_PERIOD ||
+      !MathIsValidNumber(InpRsiNeutralLower) ||
+      !MathIsValidNumber(InpRsiNeutralUpper) ||
+      InpRsiNeutralLower<0.0 || InpRsiNeutralLower>=50.0 ||
+      InpRsiNeutralUpper<=50.0 || InpRsiNeutralUpper>100.0)
+     { g_status="参数错误：RSI参数"; return false; }
+   double weight_sum=InpEmaDistanceWeight+InpEmaSlopeWeight+
+                     InpSupertrendWeight+InpRsiWeight;
+   if(!MathIsValidNumber(InpEmaDistanceWeight) ||
+      !MathIsValidNumber(InpEmaSlopeWeight) ||
+      !MathIsValidNumber(InpSupertrendWeight) ||
+      !MathIsValidNumber(InpRsiWeight) ||
+      InpEmaDistanceWeight<=0.0 || InpEmaSlopeWeight<=0.0 ||
+      InpSupertrendWeight<=0.0 || InpRsiWeight<=0.0 ||
+      !MathIsValidNumber(weight_sum) || MathAbs(weight_sum-100.0)>1e-6)
+     { g_status="参数错误：评分权重"; return false; }
+   if(!MathIsValidNumber(InpCandidateEntryScore) ||
+      !MathIsValidNumber(InpDirectionMaintenanceScore) ||
+      InpDirectionMaintenanceScore<=0.0 ||
+      InpDirectionMaintenanceScore>=InpCandidateEntryScore ||
+      InpCandidateEntryScore>100.0)
+     { g_status="参数错误：评分阈值"; return false; }
+   if(!MathIsValidNumber(InpMinimumConfirmationSeconds) ||
+      !MathIsValidNumber(InpMaximumConfirmationSeconds) ||
+      InpMinimumConfirmationSeconds<=0.0 ||
+      InpMinimumConfirmationSeconds>InpMaximumConfirmationSeconds)
+     { g_status="参数错误：确认时间"; return false; }
+   if(!MathIsValidNumber(InpEmaDistanceAtrScale) ||
+      !MathIsValidNumber(InpEmaSlopeAtrScale) ||
+      !MathIsValidNumber(InpSupertrendAtrScale) ||
+      InpEmaDistanceAtrScale<=0.0 || InpEmaSlopeAtrScale<=0.0 ||
+      InpSupertrendAtrScale<=0.0)
+     { g_status="参数错误：标准化尺度"; return false; }
+   if(InpTimerMilliseconds<50 ||
       InpMaximumActiveTickGapMs<=0 || InpReconnectResetSeconds<=0 ||
       InpPushPlusTimeoutMs<=0 || InpLargeNotificationSeconds<=0)
-     { g_status="参数错误：计时参数无效"; return false; }
+     { g_status="参数错误：运行计时"; return false; }
    return true;
   }
 bool ResolveTargetSymbol()
@@ -119,7 +169,7 @@ void ReleaseHandles()
    if(g_atr_handle!=INVALID_HANDLE) IndicatorRelease(g_atr_handle);
    if(g_rsi_handle!=INVALID_HANDLE) IndicatorRelease(g_rsi_handle);
    g_fast_ema_handle=g_slow_ema_handle=g_atr_handle=g_rsi_handle=INVALID_HANDLE;
-   g_runtime_ready=false;
+   g_runtime_ready=false; g_st_cache_ready=false; g_st_active_time=0;
   }
 bool CreateIndicatorHandles()
   {
@@ -135,87 +185,289 @@ bool CreateIndicatorHandles()
   }
 bool TryInitializeRuntime()
   {
+   if(!g_inputs_valid) return false;
    if(g_runtime_ready) return true;
    if(g_symbol=="" && !ResolveTargetSymbol()) return false;
-   if(!CreateIndicatorHandles()) return false;
+   if(g_atr_handle==INVALID_HANDLE && !CreateIndicatorHandles()) return false;
+   if(!InitializeSupertrendCache()) return false;
    g_runtime_ready=true; g_status="等待首个有效M5信号";
    return true;
   }
 int RequiredHistoryBars()
-  { return MathMin(MAX_HISTORY_BARS,MathMax(200,InpAtrPeriod*10)); }
-int CompareValues(const double left,const double right)
-  { return left>right ? DIR_LONG : left<right ? DIR_SHORT : DIR_NONE; }
-int MajorityVote(const int a,const int b,const int c)
   {
-   int longs=(a==DIR_LONG)+(b==DIR_LONG)+(c==DIR_LONG);
-   int shorts=(a==DIR_SHORT)+(b==DIR_SHORT)+(c==DIR_SHORT);
-   return longs>=2 ? DIR_LONG : shorts>=2 ? DIR_SHORT : DIR_NONE;
+   int scaled=(InpAtrPeriod>MAX_HISTORY_BARS/10) ?
+              MAX_HISTORY_BARS : InpAtrPeriod*10;
+   return MathMin(MAX_HISTORY_BARS,MathMax(200,scaled));
   }
-bool CalculateSupertrendVote(const MqlRates &rates[],const double &atr[],
-                             const int count,int &vote,double &line)
+double ClampUnit(const double value)
+  { return MathMax(-1.0,MathMin(1.0,value)); }
+bool AdvanceSupertrendValues(const MqlRates &bar,const double atr,
+                             double &upper,double &lower,bool &long_trend,
+                             double &previous_close,const bool initialized)
   {
-   if(count<3) return false;
-   double mid=(rates[0].high+rates[0].low)*0.5;
-   double upper=mid+InpSupertrendMultiplier*atr[0];
-   double lower=mid-InpSupertrendMultiplier*atr[0];
-   bool long_trend=rates[0].close>=mid;
-   for(int i=1;i<count;i++)
+   if(!MathIsValidNumber(bar.open) || !MathIsValidNumber(bar.high) ||
+      !MathIsValidNumber(bar.low) || !MathIsValidNumber(bar.close) ||
+      !MathIsValidNumber(atr) || atr<=0.0)
+      return false;
+   double midpoint=(bar.high+bar.low)*0.5;
+   double basic_upper=midpoint+InpSupertrendMultiplier*atr;
+   double basic_lower=midpoint-InpSupertrendMultiplier*atr;
+   if(!MathIsValidNumber(midpoint) || !MathIsValidNumber(basic_upper) ||
+      !MathIsValidNumber(basic_lower))
+      return false;
+   if(!initialized)
      {
-      mid=(rates[i].high+rates[i].low)*0.5;
-      double basic_upper=mid+InpSupertrendMultiplier*atr[i];
-      double basic_lower=mid-InpSupertrendMultiplier*atr[i];
-      double final_upper=(basic_upper>=upper && rates[i-1].close<=upper) ? upper : basic_upper;
-      double final_lower=(basic_lower<=lower && rates[i-1].close>=lower) ? lower : basic_lower;
-      if(long_trend && rates[i].close<final_lower) long_trend=false;
-      else if(!long_trend && rates[i].close>final_upper) long_trend=true;
+      upper=basic_upper; lower=basic_lower;
+      long_trend=bar.close>=midpoint;
+     }
+   else
+     {
+      double final_upper=(basic_upper>=upper && previous_close<=upper) ?
+                         upper : basic_upper;
+      double final_lower=(basic_lower<=lower && previous_close>=lower) ?
+                         lower : basic_lower;
+      if(long_trend && bar.close<final_lower) long_trend=false;
+      else if(!long_trend && bar.close>final_upper) long_trend=true;
       upper=final_upper; lower=final_lower;
      }
-   line=long_trend ? lower : upper;
-   vote=CompareValues(rates[count-1].close,line);
+   previous_close=bar.close;
    return true;
   }
-bool ReadLiveSignal(SignalSnapshot &s)
+bool InitializeSupertrendCache()
   {
+   ResetSignalState();
    int count=RequiredHistoryBars();
-   if(BarsCalculated(g_fast_ema_handle)<count || BarsCalculated(g_slow_ema_handle)<count ||
-      BarsCalculated(g_atr_handle)<count || BarsCalculated(g_rsi_handle)<count)
+   if(BarsCalculated(g_atr_handle)<count+1)
+     { g_status="等待M5历史数据"; return false; }
+   MqlRates rates[]; double atr[];
+   ArraySetAsSeries(rates,false); ArraySetAsSeries(atr,false);
+   if(CopyRates(g_symbol,PERIOD_M5,1,count,rates)!=count ||
+      CopyBuffer(g_atr_handle,0,1,count,atr)!=count)
+     { g_status="M5历史缓存未就绪"; return false; }
+   double upper=0.0,lower=0.0,previous_close=0.0;
+   bool long_trend=false,initialized=false;
+   datetime committed_time=0;
+   for(int i=0;i<count;i++)
+     {
+      if(!AdvanceSupertrendValues(rates[i],atr[i],upper,lower,long_trend,
+                                  previous_close,initialized))
+         return false;
+      initialized=true; committed_time=rates[i].time;
+     }
+   if(!initialized) return false;
+   g_st_final_upper=upper; g_st_final_lower=lower;
+   g_st_long_trend=long_trend; g_st_previous_close=previous_close;
+   g_st_committed_open=rates[count-1].open;
+   g_st_committed_high=rates[count-1].high;
+   g_st_committed_low=rates[count-1].low;
+   g_st_committed_atr=atr[count-1];
+   g_st_committed_time=committed_time; g_st_active_time=0;
+   g_st_cache_ready=true;
+   return true;
+  }
+bool PreviewCurrentSupertrend(const MqlRates &bar,const double atr,double &line)
+  {
+   if(!g_st_cache_ready || bar.time<=g_st_committed_time) return false;
+   double upper=g_st_final_upper,lower=g_st_final_lower;
+   double previous_close=g_st_previous_close;
+   bool long_trend=g_st_long_trend;
+   if(!AdvanceSupertrendValues(bar,atr,upper,lower,long_trend,
+                               previous_close,true))
+      return false;
+   line=long_trend ? lower : upper;
+   return MathIsValidNumber(line);
+  }
+bool SynchronizeSupertrendCache(const MqlRates &current_bar,
+                                const MqlRates &previous_bar,
+                                const double previous_atr)
+  {
+   if(!g_st_cache_ready) return InitializeSupertrendCache();
+   if(current_bar.time<=g_st_committed_time ||
+      (g_st_active_time!=0 && current_bar.time<g_st_active_time))
+      return InitializeSupertrendCache();
+   if(g_st_active_time==0)
+     {
+      if(previous_bar.time!=g_st_committed_time ||
+         previous_bar.open!=g_st_committed_open ||
+         previous_bar.high!=g_st_committed_high ||
+         previous_bar.low!=g_st_committed_low ||
+         previous_bar.close!=g_st_previous_close ||
+         previous_atr!=g_st_committed_atr)
+         return InitializeSupertrendCache();
+      g_st_active_time=current_bar.time;
+      return true;
+     }
+   if(current_bar.time==g_st_active_time)
+     {
+      if(previous_bar.time!=g_st_committed_time ||
+         previous_bar.open!=g_st_committed_open ||
+         previous_bar.high!=g_st_committed_high ||
+         previous_bar.low!=g_st_committed_low ||
+         previous_bar.close!=g_st_previous_close ||
+         previous_atr!=g_st_committed_atr)
+         return InitializeSupertrendCache();
+      return true;
+     }
+   if(previous_bar.time!=g_st_active_time ||
+      previous_bar.time<=g_st_committed_time)
+      return InitializeSupertrendCache();
+   double upper=g_st_final_upper,lower=g_st_final_lower;
+   double previous_close=g_st_previous_close;
+   bool long_trend=g_st_long_trend;
+   if(!AdvanceSupertrendValues(previous_bar,previous_atr,upper,lower,
+                               long_trend,previous_close,true))
+      return false;
+   g_st_final_upper=upper; g_st_final_lower=lower;
+   g_st_long_trend=long_trend; g_st_previous_close=previous_close;
+   g_st_committed_open=previous_bar.open;
+   g_st_committed_high=previous_bar.high;
+   g_st_committed_low=previous_bar.low;
+   g_st_committed_atr=previous_atr;
+   g_st_committed_time=previous_bar.time; g_st_active_time=current_bar.time;
+   return true;
+  }
+bool ReadAdaptiveSignal(ScoreSnapshot &snapshot)
+  {
+   if(BarsCalculated(g_fast_ema_handle)<2 ||
+      BarsCalculated(g_slow_ema_handle)<1 ||
+      BarsCalculated(g_atr_handle)<2 || BarsCalculated(g_rsi_handle)<1)
      { g_status="等待M5历史数据"; return false; }
    MqlRates rates[]; double atr[],fast[],slow[],rsi[];
-   ArraySetAsSeries(rates,false); ArraySetAsSeries(atr,false);
-   if(CopyRates(g_symbol,PERIOD_M5,0,count,rates)!=count ||
-      CopyBuffer(g_atr_handle,0,0,count,atr)!=count ||
-      CopyBuffer(g_fast_ema_handle,0,0,1,fast)!=1 ||
+   ArraySetAsSeries(rates,true); ArraySetAsSeries(atr,true);
+   ArraySetAsSeries(fast,true); ArraySetAsSeries(slow,true);
+   ArraySetAsSeries(rsi,true);
+   if(CopyRates(g_symbol,PERIOD_M5,0,2,rates)!=2 ||
+      CopyBuffer(g_atr_handle,0,0,2,atr)!=2 ||
+      CopyBuffer(g_fast_ema_handle,0,0,2,fast)!=2 ||
       CopyBuffer(g_slow_ema_handle,0,0,1,slow)!=1 ||
       CopyBuffer(g_rsi_handle,0,0,1,rsi)!=1)
      { g_status="M5数据复制未完成"; return false; }
-   int st_vote=DIR_NONE; double st_line=0.0;
-   if(!CalculateSupertrendVote(rates,atr,count,st_vote,st_line)) return false;
+   if(!SynchronizeSupertrendCache(rates[0],rates[1],atr[1])) return false;
+   double supertrend_line=0.0;
+   if(!PreviewCurrentSupertrend(rates[0],atr[0],supertrend_line)) return false;
    MqlTick tick; if(!SymbolInfoTick(g_symbol,tick)) return false;
-   s.fast_ema=fast[0]; s.slow_ema=slow[0]; s.rsi=rsi[0];
-   s.close=rates[count-1].close; s.supertrend_line=st_line;
-   s.ema_vote=CompareValues(s.fast_ema,s.slow_ema);
-   s.supertrend_vote=st_vote; s.rsi_vote=CompareValues(s.rsi,InpRsiMidpoint);
-   s.candidate=MajorityVote(s.ema_vote,s.supertrend_vote,s.rsi_vote);
-   s.tick_time_msc=tick.time_msc; s.server_time=(datetime)tick.time;
+   double price=tick.bid;
+   if(!MathIsValidNumber(fast[0]) || !MathIsValidNumber(fast[1]) ||
+      !MathIsValidNumber(slow[0]) || !MathIsValidNumber(atr[0]) ||
+      !MathIsValidNumber(rsi[0]) || !MathIsValidNumber(price) ||
+      !MathIsValidNumber(supertrend_line) || atr[0]<=0.0 || price<=0.0)
+     { g_status="M5评分数据无效"; return false; }
+   snapshot.ema_score=
+      InpEmaDistanceWeight*
+      ClampUnit((fast[0]-slow[0])/(InpEmaDistanceAtrScale*atr[0]))+
+      InpEmaSlopeWeight*
+      ClampUnit((fast[0]-fast[1])/(InpEmaSlopeAtrScale*atr[0]));
+   snapshot.supertrend_score=InpSupertrendWeight*
+      ClampUnit((price-supertrend_line)/(InpSupertrendAtrScale*atr[0]));
+   snapshot.rsi_score=0.0;
+   if(rsi[0]>InpRsiNeutralUpper)
+      snapshot.rsi_score=InpRsiWeight*
+         ClampUnit((rsi[0]-InpRsiNeutralUpper)/8.0);
+   else if(rsi[0]<InpRsiNeutralLower)
+      snapshot.rsi_score=InpRsiWeight*
+         ClampUnit((rsi[0]-InpRsiNeutralLower)/8.0);
+   if(!MathIsValidNumber(snapshot.ema_score) ||
+      !MathIsValidNumber(snapshot.supertrend_score) ||
+      !MathIsValidNumber(snapshot.rsi_score))
+     { g_status="M5评分结果无效"; return false; }
+   snapshot.total_score=MathMax(-100.0,MathMin(100.0,
+      snapshot.ema_score+snapshot.supertrend_score+snapshot.rsi_score));
+   snapshot.required_seconds=RequiredConfirmationSeconds(snapshot.total_score);
+   snapshot.fast_ema=fast[0]; snapshot.slow_ema=slow[0];
+   snapshot.rsi=rsi[0]; snapshot.close=price;
+   snapshot.supertrend_line=supertrend_line;
+   snapshot.tick_time_msc=tick.time_msc;
+   snapshot.server_time=(datetime)tick.time;
    return true;
   }
 void ResetSignalState()
-  { g_confirmed_direction=g_pending_direction=DIR_NONE; g_pending_elapsed_ms=0; g_last_pending_tick_ms=0; }
-bool AdvanceReversalState(const int candidate,const ulong now_ms)
   {
-   if(g_confirmed_direction==DIR_NONE)
-     { if(candidate!=DIR_NONE) g_confirmed_direction=candidate; return false; }
-   if(candidate==DIR_NONE || candidate==g_confirmed_direction)
-     { g_pending_direction=DIR_NONE; g_pending_elapsed_ms=0; g_last_pending_tick_ms=0; return false; }
-   if(g_pending_direction!=candidate)
-     { g_pending_direction=candidate; g_pending_elapsed_ms=0; g_last_pending_tick_ms=now_ms; return false; }
-   ulong delta=now_ms>=g_last_pending_tick_ms ? now_ms-g_last_pending_tick_ms : 0;
-   if(delta<=(ulong)InpMaximumActiveTickGapMs) g_pending_elapsed_ms+=delta;
-   g_last_pending_tick_ms=now_ms;
-   if(g_pending_elapsed_ms<(ulong)InpHoldSeconds*1000) return false;
-   g_confirmed_direction=candidate; g_pending_direction=DIR_NONE;
-   g_pending_elapsed_ms=0; g_last_pending_tick_ms=0;
-   return true;
+   g_confirmed_direction=g_pending_direction=DIR_NONE;
+   g_confirmation_progress=0.0; g_pending_required_seconds=0.0;
+   g_last_confirmation_tick_ms=0; g_has_last_confirmation_tick=false;
+  }
+double RequiredConfirmationSeconds(const double score)
+  {
+   double required=InpMaximumConfirmationSeconds-
+      (MathAbs(score)-InpCandidateEntryScore)*
+      (InpMaximumConfirmationSeconds-InpMinimumConfirmationSeconds)/25.0;
+   return MathMax(InpMinimumConfirmationSeconds,
+                  MathMin(InpMaximumConfirmationSeconds,required));
+  }
+int ScoreDirection(const double score,const double threshold)
+  {
+   if(score>=threshold) return DIR_LONG;
+   if(score<=-threshold) return DIR_SHORT;
+   return DIR_NONE;
+  }
+bool AdvanceAdaptiveState(const double score,const ulong now_ms)
+  {
+   if(!MathIsValidNumber(score)) return false;
+   int entry_direction=ScoreDirection(score,InpCandidateEntryScore);
+   if(g_confirmed_direction==DIR_NONE && g_pending_direction==DIR_NONE &&
+      entry_direction!=DIR_NONE)
+     {
+      g_confirmed_direction=entry_direction;
+      g_last_confirmation_tick_ms=now_ms;
+      g_has_last_confirmation_tick=true;
+      return false;
+     }
+   ulong delta_ms=0;
+   if(g_has_last_confirmation_tick && now_ms>=g_last_confirmation_tick_ms)
+      delta_ms=now_ms-g_last_confirmation_tick_ms;
+   double active_seconds=delta_ms<=(ulong)InpMaximumActiveTickGapMs ?
+                         (double)delta_ms/1000.0 : 0.0;
+   g_last_confirmation_tick_ms=now_ms;
+   g_has_last_confirmation_tick=true;
+   if(entry_direction==g_confirmed_direction)
+     {
+      g_pending_direction=DIR_NONE; g_confirmation_progress=0.0;
+      g_pending_required_seconds=0.0;
+      return false;
+     }
+   if(entry_direction!=DIR_NONE && entry_direction!=g_pending_direction)
+     {
+      g_pending_direction=entry_direction;
+      g_pending_required_seconds=RequiredConfirmationSeconds(score);
+      g_confirmation_progress=ClampUnit(
+         active_seconds/RequiredConfirmationSeconds(score));
+      g_confirmation_progress=MathMax(0.0,g_confirmation_progress);
+      return false;
+     }
+   if(g_pending_direction==DIR_NONE) return false;
+   int maintenance_direction=
+      ScoreDirection(score,InpDirectionMaintenanceScore);
+   if(maintenance_direction==-g_pending_direction)
+     {
+      g_pending_direction=DIR_NONE; g_confirmation_progress=0.0;
+      g_pending_required_seconds=0.0;
+      return false;
+     }
+   if(entry_direction==g_pending_direction)
+     {
+      g_pending_required_seconds=RequiredConfirmationSeconds(score);
+      g_confirmation_progress+=
+         active_seconds/RequiredConfirmationSeconds(score);
+      if(g_confirmation_progress>=1.0)
+        {
+         g_confirmed_direction=g_pending_direction;
+         g_pending_direction=DIR_NONE; g_confirmation_progress=0.0;
+         g_pending_required_seconds=0.0;
+         g_has_last_confirmation_tick=true;
+         return true;
+        }
+     }
+   else if(maintenance_direction==g_pending_direction)
+      g_confirmation_progress-=
+         active_seconds/InpMaximumConfirmationSeconds*0.5;
+   else
+      g_confirmation_progress-=
+         active_seconds/InpMaximumConfirmationSeconds;
+   g_confirmation_progress=MathMax(0.0,MathMin(1.0,
+                                               g_confirmation_progress));
+   if(g_confirmation_progress<=0.0)
+     { g_pending_direction=DIR_NONE; g_pending_required_seconds=0.0; }
+   return false;
   }
 string JsonEscape(string value)
   {
@@ -232,15 +484,15 @@ string BuildReversalTitle(const int previous_direction,const int direction)
    return g_symbol+" M5 "+transition;
   }
 string BuildReversalContent(const int previous_direction,const int direction,
-                            const SignalSnapshot &s)
+                            const ScoreSnapshot &s)
   {
    string transition=(previous_direction==DIR_SHORT && direction==DIR_LONG) ? "空转多" : "多转空";
    return "品种："+g_symbol+"\n周期：M5\n方向："+transition+
           "\n服务器时间："+TimeToString(s.server_time,TIME_DATE|TIME_SECONDS)+
-          "\nEMA："+DirectionText(s.ema_vote)+
-          "\nSupertrend："+DirectionText(s.supertrend_vote)+
-          "\nRSI："+DirectionText(s.rsi_vote)+
-          "\n确认时间："+IntegerToString(InpHoldSeconds)+" 秒";
+          "\nEMA："+DoubleToString(s.ema_score,1)+
+          "\nSupertrend："+DoubleToString(s.supertrend_score,1)+
+          "\nRSI："+DoubleToString(s.rsi_score,1)+
+          "\n确认时间："+DoubleToString(s.required_seconds,1)+" 秒";
   }
 bool IsJsonWhitespace(const ushort ch)
   { return ch==' ' || ch=='\t' || ch=='\r' || ch=='\n'; }
@@ -497,7 +749,7 @@ void CreateLargeLabel(const string suffix,const string text,const int font_size,
    ObjectSetInteger(0,name,OBJPROP_ZORDER,1);
   }
 void ShowLargeNotification(const int previous_direction,const int direction,
-                           const SignalSnapshot &s)
+                           const ScoreSnapshot &s)
   {
    if(!InpEnableLargeNotification) return;
    HideLargeNotification();
@@ -517,9 +769,9 @@ void ShowLargeNotification(const int previous_direction,const int direction,
 
    CreateLargeLabel("LARGE_TITLE",g_symbol+" · M5  "+transition,28,accent);
    string body="服务器时间："+TimeToString(s.server_time,TIME_DATE|TIME_SECONDS)+
-               "\nEMA："+DirectionText(s.ema_vote)+
-               "\nSupertrend："+DirectionText(s.supertrend_vote)+
-               "\nRSI："+DirectionText(s.rsi_vote)+
+               "\nEMA："+DoubleToString(s.ema_score,1)+
+               "\nSupertrend："+DoubleToString(s.supertrend_score,1)+
+               "\nRSI："+DoubleToString(s.rsi_score,1)+
                "\nPushPlus："+g_push_status;
    CreateLargeLabel("LARGE_BODY",body,15,clrWhite);
    CreateLargeLabel("LARGE_COUNTDOWN","",12,clrSilver);
@@ -558,7 +810,7 @@ void UpdateLargeNotification()
    ChartRedraw(0);
   }
 void EmitConfirmedReversal(const int previous_direction,const int direction,
-                           const SignalSnapshot &s)
+                           const ScoreSnapshot &s)
   {
    if(InpEnableSound)
      {
@@ -595,17 +847,20 @@ void RenderPanel()
    SetLabel("TITLE",0,shown+" · M5 PushPlus 多空监控",clrWhite);
    SetLabel("DIR",1,"已确认方向："+DirectionText(g_confirmed_direction),DirectionColor(g_confirmed_direction));
    if(g_has_snapshot)
-      SetLabel("VOTES",2,"EMA "+DirectionText(g_snapshot.ema_vote)+" | Supertrend "+
-               DirectionText(g_snapshot.supertrend_vote)+" | RSI "+DirectionText(g_snapshot.rsi_vote),InpNeutralColor);
+      SetLabel("VOTES",2,"EMA "+DoubleToString(g_snapshot.ema_score,1)+" | Supertrend "+
+               DoubleToString(g_snapshot.supertrend_score,1)+" | RSI "+
+               DoubleToString(g_snapshot.rsi_score,1),InpNeutralColor);
    else SetLabel("VOTES",2,"EMA - | Supertrend - | RSI -",InpNeutralColor);
    string pending="候选：无";
    if(g_pending_direction!=DIR_NONE)
      {
-      ulong hold_ms=(ulong)InpHoldSeconds*1000;
-      ulong remaining_ms=g_pending_elapsed_ms<hold_ms ? hold_ms-g_pending_elapsed_ms : 0;
-      pending="候选："+DirectionText(g_pending_direction)+"，已保持 "+
-              DoubleToString((double)g_pending_elapsed_ms/1000.0,1)+" 秒，剩余 "+
-              DoubleToString((double)remaining_ms/1000.0,1)+" 秒";
+      double remaining_seconds=
+         MathMax(0.0,(1.0-g_confirmation_progress)*
+                    MathMax(InpMinimumConfirmationSeconds,
+                            g_pending_required_seconds));
+      pending="候选："+DirectionText(g_pending_direction)+"，进度 "+
+              DoubleToString(g_confirmation_progress*100.0,0)+"%，剩余 "+
+              DoubleToString(remaining_seconds,1)+" 秒";
      }
    SetLabel("PENDING",3,pending,DirectionColor(g_pending_direction));
    SetLabel("PUSH",4,"PushPlus："+g_push_status,InpNeutralColor);
@@ -634,12 +889,14 @@ int OnInit()
   {
    g_panel_prefix="XAU_M5_PP_"+IntegerToString((long)ChartID())+"_"+
                   IntegerToString((long)GetMicrosecondCount())+"_";
-   if(!ValidateInputs()) { RenderPanel(); return INIT_PARAMETERS_INCORRECT; }
+   g_inputs_valid=ValidateInputs();
+   if(!g_inputs_valid) { RenderPanel(); return INIT_SUCCEEDED; }
    if(!EventSetMillisecondTimer(InpTimerMilliseconds))
      { g_status="定时器创建失败"; RenderPanel(); return INIT_FAILED; }
    if(!InpEnablePushPlus) g_push_status="已关闭";
    else if(StringLen(InpPushPlusToken)==0) g_push_status="Token 未配置";
-   TryInitializeRuntime(); RenderPanel();
+   if(g_inputs_valid) TryInitializeRuntime();
+   RenderPanel();
    return INIT_SUCCEEDED;
   }
 void OnDeinit(const int reason)
@@ -668,13 +925,19 @@ void OnTimer()
      { TryInitializeRuntime(); RenderPanel(); if(!g_runtime_ready) return; }
    MqlTick tick; if(!IsNewTargetTick(tick)) return;
    if(g_previous_server_tick_msc>0 &&
-      tick.time_msc-g_previous_server_tick_msc>(long)InpReconnectResetSeconds*1000)
-     { ResetSignalState(); g_status="报价恢复，静默重建基准"; }
+      (tick.time_msc<g_previous_server_tick_msc ||
+       tick.time_msc-g_previous_server_tick_msc>
+       (long)InpReconnectResetSeconds*1000))
+     {
+      ResetSignalState(); g_st_cache_ready=false; g_st_active_time=0;
+      if(!InitializeSupertrendCache()) { RenderPanel(); return; }
+      g_status="报价恢复，静默重建基准";
+     }
    g_previous_server_tick_msc=tick.time_msc;
-   SignalSnapshot s; if(!ReadLiveSignal(s)) { RenderPanel(); return; }
+   ScoreSnapshot s; if(!ReadAdaptiveSignal(s)) { RenderPanel(); return; }
    g_snapshot=s; g_has_snapshot=true;
    int previous=g_confirmed_direction;
-   bool confirmed=AdvanceReversalState(s.candidate,GetTickCount64());
+   bool confirmed=AdvanceAdaptiveState(s.total_score,GetTickCount64());
    if(g_confirmed_direction!=DIR_NONE)
       MaybeSendStartupTest();
    if(confirmed)
