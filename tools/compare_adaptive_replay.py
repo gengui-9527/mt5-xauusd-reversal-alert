@@ -103,6 +103,15 @@ class ReplayObservation:
     confirmation_progress: float
 
 
+@dataclass(frozen=True)
+class ConfirmationTracePoint:
+    now_ms: int
+    score: float
+    pending_direction: int
+    progress: float
+    alerted: bool
+
+
 @dataclass
 class _LegacyState:
     confirmed: int = 0
@@ -218,6 +227,25 @@ def build_report(
             )
         )
     return tuple(report_rows)
+
+
+def interrupted_range_trace() -> tuple[ConfirmationTracePoint, ...]:
+    """Candidate interrupted at 8 elapsed seconds, before its 10s requirement."""
+    scores = (-55.0,) * 9 + (-45.0,) + (0.0,) * 9
+    state = ConfirmationState(confirmed=1)
+    trace = []
+    for tick, score in enumerate(scores):
+        state, alerted = advance_confirmation(state, score, tick * 1_000)
+        trace.append(
+            ConfirmationTracePoint(
+                tick * 1_000,
+                score,
+                state.pending,
+                state.progress,
+                alerted,
+            )
+        )
+    return tuple(trace)
 
 
 def compare_replay(rows: Iterable[ReplayRow]) -> ReplayResult:

@@ -245,3 +245,64 @@ Results:
 - Python compilation: exit 0;
 - diff check: exit 0;
 - informational Windows LF-to-CRLF normalization warnings only.
+
+## Fix Round 2
+
+### Boundary-artifact regression: RED
+
+The range test was first changed to import a dedicated interrupted trace helper.
+Before implementation, the focused run failed at the intended boundary:
+
+```text
+ImportError: cannot import name 'interrupted_range_trace' from
+'tools.compare_adaptive_replay'
+FAILED (errors=1)
+```
+
+This replaced the invalid claim that the committed CSV itself demonstrated an
+interrupted candidate. In the previous fixture, a score of exactly `-55`
+received observations at offsets `0..10`; its no-alert result depended on ten
+floating-point additions of `0.1` ending infinitesimally below `1.0`.
+
+### Explicit separation of evidence: GREEN
+
+The two deterministic checks now have distinct responsibilities:
+
+- The committed 120-row CSV preserves normal M5 expansion at offsets `0..10`
+  for every row. Its range scores approach entry and cross maintenance/neutral
+  zones, but remain strictly below entry. The strongest absolute range score is
+  `54.6875`, all pending directions remain zero, and adaptive range alerts are
+  zero. Therefore CSV acceptance has no exact-boundary candidate.
+- `interrupted_range_trace()` directly exercises confirmation mechanics without
+  pretending consecutive M5 snapshots are continuous ticks. It feeds `-55` at
+  `t=0..8s`, proving only 8 elapsed seconds and progress `0.8`; `-45` at `t=9s`
+  rewinds progress to `0.75`; neutral observations then clear the candidate.
+  No trace point alerts.
+
+Focused diagnostics:
+
+```text
+CSV maximum absolute range score: 54.6875
+CSV range alerts: legacy=2, adaptive=0
+Interrupted trace: t=8s progress=0.8; t=9s maintenance progress=0.75
+Interrupted trace alerts: none
+```
+
+### Fix-round 2 final verification
+
+```text
+focused incremental/replay tests: 18 passed
+default replay: exit 0
+full suite: 71 passed
+Python compilation: exit 0
+git diff --check: exit 0
+```
+
+The replay output remains:
+
+```text
+segment,legacy_alert_time,adaptive_alert_time,adaptive_lead_seconds,range_alert_count
+top_reversal,1704076210,1704076206,4,0
+v_reversal,1704091210,1704091204,6,0
+range,,,,0
+```

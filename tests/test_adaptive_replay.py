@@ -11,6 +11,7 @@ from tools.compare_adaptive_replay import (
     Alert,
     build_report,
     compare_replay,
+    interrupted_range_trace,
     load_fixture,
 )
 
@@ -166,33 +167,36 @@ class AdaptiveReplayTests(unittest.TestCase):
                     any(abs(abs(score) - target) <= 0.01 for score in first_tick_scores)
                 )
 
-    def test_range_creates_and_rewinds_candidate_without_alerting(self):
+    def test_csv_range_crosses_threshold_zones_without_boundary_candidate(self):
         result = compare_replay(load_fixture(FIXTURE))
         trace = [item for item in result.observations if item.segment == "range"]
         range_scores = [item.score for item in trace if item.offset == 0]
-        candidate_points = [
-            (index, item)
-            for index, item in enumerate(trace)
-            if item.pending_direction and item.confirmation_progress > 0
-        ]
 
-        self.assertTrue(any(abs(score) >= 55 for score in range_scores))
+        self.assertTrue(any(54 <= abs(score) < 55 for score in range_scores))
         self.assertTrue(any(35 <= abs(score) < 55 for score in range_scores))
         self.assertTrue(any(abs(score) < 35 for score in range_scores))
-        self.assertTrue(candidate_points)
-        self.assertTrue(
-            any(
-                later.pending_direction == point.pending_direction
-                and later.confirmation_progress < point.confirmation_progress
-                for index, point in candidate_points
-                for later in trace[index + 1:]
-            )
-        )
+        self.assertTrue(all(abs(score) < 55 for score in range_scores))
+        self.assertTrue(all(item.pending_direction == 0 for item in trace))
         self.assertLessEqual(
             result.adaptive_range_alert_count,
             result.legacy_range_alert_count * 1.5,
         )
         self.assertEqual(result.adaptive_range_alert_count, 0)
+
+    def test_interrupted_range_trace_rewinds_before_required_duration(self):
+        trace = interrupted_range_trace()
+
+        self.assertEqual([point.now_ms for point in trace[:9]], list(range(0, 9_000, 1_000)))
+        self.assertEqual({point.score for point in trace[:9]}, {-55.0})
+        self.assertEqual(trace[8].pending_direction, -1)
+        self.assertAlmostEqual(trace[8].progress, 0.8)
+        self.assertFalse(trace[8].alerted)
+        self.assertEqual(trace[9].score, -45.0)
+        self.assertAlmostEqual(trace[9].progress, 0.75)
+        self.assertEqual(trace[-1].score, 0.0)
+        self.assertEqual(trace[-1].pending_direction, 0)
+        self.assertEqual(trace[-1].progress, 0.0)
+        self.assertFalse(any(point.alerted for point in trace))
 
     def test_correct_direction_reversals_are_adaptive_earlier_in_majority(self):
         result = compare_replay(load_fixture(FIXTURE))
