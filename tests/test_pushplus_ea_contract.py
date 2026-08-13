@@ -173,7 +173,7 @@ class PushPlusEaContractTests(unittest.TestCase):
             "double ClampUnit(const double value)",
             "bool InitializeSupertrendCache()",
             "bool PreviewCurrentSupertrend(const MqlRates &bar,const double atr,double &line)",
-            "bool ReadAdaptiveSignal(ScoreSnapshot &snapshot,const MqlTick &tick)",
+            "bool ReadAdaptiveSignal(ScoreSnapshot &snapshot)",
             "double RequiredConfirmationSeconds(const double score)",
             "bool AdvanceAdaptiveState(const double score,const ulong now_ms)",
         ):
@@ -222,10 +222,7 @@ class PushPlusEaContractTests(unittest.TestCase):
         self.assertIn("return INIT_SUCCEEDED;", init)
 
     def test_scoring_uses_exact_formulas_and_rejects_nonfinite_data(self):
-        signature = (
-            "bool ReadAdaptiveSignal(ScoreSnapshot &snapshot,"
-            "const MqlTick &tick)"
-        )
+        signature = "bool ReadAdaptiveSignal(ScoreSnapshot &snapshot)"
         self.assertIn(signature, self.source)
         scoring = self.function_source(signature)
         for text in (
@@ -254,10 +251,7 @@ class PushPlusEaContractTests(unittest.TestCase):
                 self.assertIn(text, scoring)
 
     def test_read_adaptive_signal_does_not_replay_full_history_per_tick(self):
-        signature = (
-            "bool ReadAdaptiveSignal(ScoreSnapshot &snapshot,"
-            "const MqlTick &tick)"
-        )
+        signature = "bool ReadAdaptiveSignal(ScoreSnapshot &snapshot)"
         self.assertIn(signature, self.source)
         scoring = self.function_source(signature)
         self.assertNotIn("RequiredHistoryBars()", scoring)
@@ -265,15 +259,17 @@ class PushPlusEaContractTests(unittest.TestCase):
         self.assertNotRegex(scoring, r"\bfor\s*\(")
         self.assertIn("CopyRates(g_symbol,PERIOD_M5,0,2", scoring)
 
-    def test_one_supplied_tick_owns_reconnect_score_and_progress_decisions(self):
-        signature = (
-            "bool ReadAdaptiveSignal(ScoreSnapshot &snapshot,"
-            "const MqlTick &tick)"
-        )
+    def test_one_decision_context_owns_reconnect_score_and_progress_decisions(self):
+        signature = "bool ReadAdaptiveSignal(ScoreSnapshot &snapshot)"
         self.assertIn(signature, self.source)
         scoring = self.function_source(signature)
-        self.assertNotIn("SymbolInfoTick", scoring)
+        self.assertNotIn(
+            "bool ReadAdaptiveSignal(ScoreSnapshot &snapshot,const MqlTick &tick)",
+            self.source,
+        )
         for text in (
+            "if(!g_decision_tick_valid) return false;",
+            "MqlTick tick=g_decision_tick;",
             "double price=tick.bid;",
             "snapshot.tick_time_msc=tick.time_msc;",
             "snapshot.server_time=(datetime)tick.time;",
@@ -286,7 +282,10 @@ class PushPlusEaContractTests(unittest.TestCase):
         timer = self.function_source("void OnTimer()")
         self.assertIn("MqlTick decision_tick;", timer)
         self.assertIn("IsNewTargetTick(decision_tick)", timer)
-        self.assertIn("ReadAdaptiveSignal(s,decision_tick)", timer)
+        self.assertIn("g_decision_tick=decision_tick;", timer)
+        self.assertIn("g_decision_tick_valid=true;", timer)
+        self.assertIn("ReadAdaptiveSignal(s)", timer)
+        self.assertIn("g_decision_tick_valid=false;", timer)
         self.assertIn("decision_tick.time_msc-g_previous_server_tick_msc", timer)
         self.assertIn(
             "g_previous_server_tick_msc=decision_tick.time_msc;",
@@ -303,13 +302,65 @@ class PushPlusEaContractTests(unittest.TestCase):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, new_tick)
         timer = self.function_source("void OnTimer()")
-        self.assertIn("ReadAdaptiveSignal(s,decision_tick)", timer)
+        self.assertIn("ReadAdaptiveSignal(s)", timer)
         self.assertIn("g_last_tick_time_msc=decision_tick.time_msc;", timer)
-        read_pos = timer.index("ReadAdaptiveSignal(s,decision_tick)")
+        read_pos = timer.index("ReadAdaptiveSignal(s)")
         mark_pos = timer.index("g_last_tick_time_msc=decision_tick.time_msc;")
         advance_pos = timer.index("AdvanceAdaptiveState(")
         self.assertLess(read_pos, mark_pos)
         self.assertLess(mark_pos, advance_pos)
+
+    def test_post_copy_tick_stability_precedes_cache_or_score_mutation(self):
+        self.assertIn(
+            "bool ReadAdaptiveSignal(ScoreSnapshot &snapshot)",
+            self.source,
+        )
+        scoring = self.function_source(
+            "bool ReadAdaptiveSignal(ScoreSnapshot &snapshot)"
+        )
+        copy_pos = scoring.rindex("CopyBuffer(")
+        verify_fetch_pos = scoring.index(
+            "SymbolInfoTick(g_symbol,verification_tick)"
+        )
+        identity_pos = scoring.index(
+            "verification_tick.time_msc!=tick.time_msc"
+        )
+        cache_pos = scoring.index("SynchronizeSupertrendCache(")
+        score_pos = scoring.index("snapshot.ema_score=")
+        self.assertLess(copy_pos, verify_fetch_pos)
+        self.assertLess(verify_fetch_pos, identity_pos)
+        self.assertLess(identity_pos, cache_pos)
+        self.assertLess(cache_pos, score_pos)
+        for text in (
+            "verification_tick.bid!=tick.bid",
+            "verification_tick.ask!=tick.ask",
+            'g_status="M5报价更新，等待重试";',
+            "return false;",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, scoring[verify_fetch_pos:cache_pos])
+
+    def test_reconnect_reset_mutates_state_only_after_tick_stability(self):
+        scoring = self.function_source(
+            "bool ReadAdaptiveSignal(ScoreSnapshot &snapshot)"
+        )
+        identity_pos = scoring.index(
+            "verification_tick.time_msc!=tick.time_msc"
+        )
+        self.assertIn("if(reconnect_reset)", scoring)
+        reconnect_pos = scoring.index("if(reconnect_reset)")
+        reset_pos = scoring.index("ResetSignalState();", reconnect_pos)
+        bar_identity_pos = scoring.index("tick_bar_shift!=0")
+        cache_pos = scoring.index("SynchronizeSupertrendCache(")
+        self.assertLess(identity_pos, reconnect_pos)
+        self.assertLess(bar_identity_pos, reconnect_pos)
+        self.assertLess(reconnect_pos, reset_pos)
+        self.assertLess(reset_pos, cache_pos)
+        timer = self.function_source("void OnTimer()")
+        read_pos = timer.index("ReadAdaptiveSignal(s)")
+        self.assertNotIn("ResetSignalState();", timer[:read_pos])
+        self.assertNotIn("InitializeSupertrendCache()", timer[:read_pos])
+        self.assertIn("g_decision_reconnect_reset=reconnect_reset;", timer)
 
     def test_supertrend_history_is_bounded_and_preview_does_not_mutate_cache(self):
         required = self.function_source("int RequiredHistoryBars()")
@@ -354,7 +405,11 @@ class PushPlusEaContractTests(unittest.TestCase):
         self.assertIn("ResetSignalState();", initialize)
         timer = self.function_source("void OnTimer()")
         self.assertIn("tick.time_msc<g_previous_server_tick_msc", timer)
-        self.assertIn("g_st_cache_ready=false;", timer)
+        self.assertIn("g_decision_reconnect_reset=reconnect_reset;", timer)
+        scoring = self.function_source(
+            "bool ReadAdaptiveSignal(ScoreSnapshot &snapshot)"
+        )
+        self.assertIn("g_st_cache_ready=false;", scoring)
 
     def test_runtime_cache_retry_preserves_calculating_indicator_handles(self):
         initialize = self.function_source("bool TryInitializeRuntime()")

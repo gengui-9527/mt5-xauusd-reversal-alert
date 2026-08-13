@@ -82,6 +82,9 @@ double g_st_committed_low=0.0,g_st_committed_atr=0.0;
 datetime g_st_committed_time=0,g_st_active_time=0;
 long g_last_tick_time_msc=0,g_previous_server_tick_msc=0;
 double g_last_tick_bid=0.0,g_last_tick_ask=0.0;
+MqlTick g_decision_tick;
+bool g_decision_tick_valid=false;
+bool g_decision_reconnect_reset=false;
 bool g_large_visible=false;
 ulong g_large_hide_at_ms=0;
 int g_large_font_size=15;
@@ -329,8 +332,11 @@ bool SynchronizeSupertrendCache(const MqlRates &current_bar,
    g_st_committed_time=previous_bar.time; g_st_active_time=current_bar.time;
    return true;
   }
-bool ReadAdaptiveSignal(ScoreSnapshot &snapshot,const MqlTick &tick)
+bool ReadAdaptiveSignal(ScoreSnapshot &snapshot)
   {
+   if(!g_decision_tick_valid) return false;
+   MqlTick tick=g_decision_tick;
+   bool reconnect_reset=g_decision_reconnect_reset;
    if(BarsCalculated(g_fast_ema_handle)<2 ||
       BarsCalculated(g_slow_ema_handle)<1 ||
       BarsCalculated(g_atr_handle)<2 || BarsCalculated(g_rsi_handle)<1)
@@ -345,10 +351,20 @@ bool ReadAdaptiveSignal(ScoreSnapshot &snapshot,const MqlTick &tick)
       CopyBuffer(g_slow_ema_handle,0,0,1,slow)!=1 ||
       CopyBuffer(g_rsi_handle,0,0,1,rsi)!=1)
      { g_status="M5数据复制未完成"; return false; }
+   MqlTick verification_tick;
+   if(!SymbolInfoTick(g_symbol,verification_tick) ||
+      verification_tick.time_msc!=tick.time_msc ||
+      verification_tick.bid!=tick.bid || verification_tick.ask!=tick.ask)
+     { g_status="M5报价更新，等待重试"; return false; }
    int tick_bar_shift=iBarShift(g_symbol,PERIOD_M5,(datetime)tick.time,true);
    if(tick_bar_shift!=0 ||
       iTime(g_symbol,PERIOD_M5,tick_bar_shift)!=rates[0].time)
      { g_status="M5报价与K线不同步"; return false; }
+   if(reconnect_reset)
+     {
+      ResetSignalState(); g_st_cache_ready=false; g_st_active_time=0;
+      g_status="报价恢复，静默重建基准";
+     }
    if(!SynchronizeSupertrendCache(rates[0],rates[1],atr[1])) return false;
    double supertrend_line=0.0;
    if(!PreviewCurrentSupertrend(rates[0],atr[0],supertrend_line)) return false;
@@ -943,17 +959,18 @@ void OnTimer()
    if(!g_runtime_ready)
      { TryInitializeRuntime(); RenderPanel(); if(!g_runtime_ready) return; }
    MqlTick decision_tick; if(!IsNewTargetTick(decision_tick)) return;
-   if(g_previous_server_tick_msc>0 &&
+   bool reconnect_reset=
+      g_previous_server_tick_msc>0 &&
       (decision_tick.time_msc<g_previous_server_tick_msc ||
        decision_tick.time_msc-g_previous_server_tick_msc>
-       (long)InpReconnectResetSeconds*1000))
-     {
-      ResetSignalState(); g_st_cache_ready=false; g_st_active_time=0;
-      if(!InitializeSupertrendCache()) { RenderPanel(); return; }
-      g_status="报价恢复，静默重建基准";
-     }
+       (long)InpReconnectResetSeconds*1000);
    ScoreSnapshot s;
-   if(!ReadAdaptiveSignal(s,decision_tick)) { RenderPanel(); return; }
+   g_decision_tick=decision_tick;
+   g_decision_reconnect_reset=reconnect_reset;
+   g_decision_tick_valid=true;
+   bool signal_ready=ReadAdaptiveSignal(s);
+   g_decision_tick_valid=false; g_decision_reconnect_reset=false;
+   if(!signal_ready) { RenderPanel(); return; }
    g_last_tick_time_msc=decision_tick.time_msc;
    g_last_tick_bid=decision_tick.bid; g_last_tick_ask=decision_tick.ask;
    g_previous_server_tick_msc=decision_tick.time_msc;
