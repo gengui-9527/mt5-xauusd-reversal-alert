@@ -173,7 +173,7 @@ class PushPlusEaContractTests(unittest.TestCase):
             "double ClampUnit(const double value)",
             "bool InitializeSupertrendCache()",
             "bool PreviewCurrentSupertrend(const MqlRates &bar,const double atr,double &line)",
-            "bool ReadAdaptiveSignal(ScoreSnapshot &snapshot)",
+            "bool ReadAdaptiveSignal(ScoreSnapshot &snapshot,const MqlTick &tick)",
             "double RequiredConfirmationSeconds(const double score)",
             "bool AdvanceAdaptiveState(const double score,const ulong now_ms)",
         ):
@@ -222,14 +222,30 @@ class PushPlusEaContractTests(unittest.TestCase):
         self.assertIn("return INIT_SUCCEEDED;", init)
 
     def test_scoring_uses_exact_formulas_and_rejects_nonfinite_data(self):
-        self.assertIn("bool ReadAdaptiveSignal(ScoreSnapshot &snapshot)", self.source)
-        scoring = self.function_source("bool ReadAdaptiveSignal(ScoreSnapshot &snapshot)")
+        signature = (
+            "bool ReadAdaptiveSignal(ScoreSnapshot &snapshot,"
+            "const MqlTick &tick)"
+        )
+        self.assertIn(signature, self.source)
+        scoring = self.function_source(signature)
         for text in (
             "MathIsValidNumber",
             "atr[0]<=0.0",
-            "(fast[0]-slow[0])/(InpEmaDistanceAtrScale*atr[0])",
-            "(fast[0]-fast[1])/(InpEmaSlopeAtrScale*atr[0])",
-            "(price-supertrend_line)/(InpSupertrendAtrScale*atr[0])",
+            "double ema_distance_denominator=InpEmaDistanceAtrScale*atr[0];",
+            "double ema_slope_denominator=InpEmaSlopeAtrScale*atr[0];",
+            "double supertrend_denominator=InpSupertrendAtrScale*atr[0];",
+            "double ema_distance_ratio=(fast[0]-slow[0])/ema_distance_denominator;",
+            "double ema_slope_ratio=(fast[0]-fast[1])/ema_slope_denominator;",
+            "double supertrend_ratio=(price-supertrend_line)/supertrend_denominator;",
+            "!MathIsValidNumber(ema_distance_denominator)",
+            "!MathIsValidNumber(ema_slope_denominator)",
+            "!MathIsValidNumber(supertrend_denominator)",
+            "!MathIsValidNumber(ema_distance_ratio)",
+            "!MathIsValidNumber(ema_slope_ratio)",
+            "!MathIsValidNumber(supertrend_ratio)",
+            "ClampUnit(ema_distance_ratio)",
+            "ClampUnit(ema_slope_ratio)",
+            "ClampUnit(supertrend_ratio)",
             "(rsi[0]-InpRsiNeutralUpper)/8.0",
             "(rsi[0]-InpRsiNeutralLower)/8.0",
             "MathMax(-100.0,MathMin(100.0",
@@ -238,12 +254,62 @@ class PushPlusEaContractTests(unittest.TestCase):
                 self.assertIn(text, scoring)
 
     def test_read_adaptive_signal_does_not_replay_full_history_per_tick(self):
-        self.assertIn("bool ReadAdaptiveSignal(ScoreSnapshot &snapshot)", self.source)
-        scoring = self.function_source("bool ReadAdaptiveSignal(ScoreSnapshot &snapshot)")
+        signature = (
+            "bool ReadAdaptiveSignal(ScoreSnapshot &snapshot,"
+            "const MqlTick &tick)"
+        )
+        self.assertIn(signature, self.source)
+        scoring = self.function_source(signature)
         self.assertNotIn("RequiredHistoryBars()", scoring)
         self.assertNotRegex(scoring, r"CopyRates\s*\([^;]*\bcount\b")
         self.assertNotRegex(scoring, r"\bfor\s*\(")
         self.assertIn("CopyRates(g_symbol,PERIOD_M5,0,2", scoring)
+
+    def test_one_supplied_tick_owns_reconnect_score_and_progress_decisions(self):
+        signature = (
+            "bool ReadAdaptiveSignal(ScoreSnapshot &snapshot,"
+            "const MqlTick &tick)"
+        )
+        self.assertIn(signature, self.source)
+        scoring = self.function_source(signature)
+        self.assertNotIn("SymbolInfoTick", scoring)
+        for text in (
+            "double price=tick.bid;",
+            "snapshot.tick_time_msc=tick.time_msc;",
+            "snapshot.server_time=(datetime)tick.time;",
+            "iBarShift(g_symbol,PERIOD_M5,(datetime)tick.time,true)",
+            "tick_bar_shift!=0",
+            "rates[0].time",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, scoring)
+        timer = self.function_source("void OnTimer()")
+        self.assertIn("MqlTick decision_tick;", timer)
+        self.assertIn("IsNewTargetTick(decision_tick)", timer)
+        self.assertIn("ReadAdaptiveSignal(s,decision_tick)", timer)
+        self.assertIn("decision_tick.time_msc-g_previous_server_tick_msc", timer)
+        self.assertIn(
+            "g_previous_server_tick_msc=decision_tick.time_msc;",
+            timer,
+        )
+
+    def test_failed_coherent_acquisition_can_retry_the_same_tick(self):
+        new_tick = self.function_source("bool IsNewTargetTick(MqlTick &tick)")
+        for forbidden in (
+            "g_last_tick_time_msc=",
+            "g_last_tick_bid=",
+            "g_last_tick_ask=",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, new_tick)
+        timer = self.function_source("void OnTimer()")
+        self.assertIn("ReadAdaptiveSignal(s,decision_tick)", timer)
+        self.assertIn("g_last_tick_time_msc=decision_tick.time_msc;", timer)
+        read_pos = timer.index("ReadAdaptiveSignal(s,decision_tick)")
+        mark_pos = timer.index("g_last_tick_time_msc=decision_tick.time_msc;")
+        advance_pos = timer.index("AdvanceAdaptiveState(")
+        self.assertLess(read_pos, mark_pos)
+        self.assertLess(mark_pos, advance_pos)
 
     def test_supertrend_history_is_bounded_and_preview_does_not_mutate_cache(self):
         required = self.function_source("int RequiredHistoryBars()")

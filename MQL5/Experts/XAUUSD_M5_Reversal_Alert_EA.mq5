@@ -200,7 +200,10 @@ int RequiredHistoryBars()
    return MathMin(MAX_HISTORY_BARS,MathMax(200,scaled));
   }
 double ClampUnit(const double value)
-  { return MathMax(-1.0,MathMin(1.0,value)); }
+  {
+   if(!MathIsValidNumber(value)) return 0.0;
+   return MathMax(-1.0,MathMin(1.0,value));
+  }
 bool AdvanceSupertrendValues(const MqlRates &bar,const double atr,
                              double &upper,double &lower,bool &long_trend,
                              double &previous_close,const bool initialized)
@@ -326,7 +329,7 @@ bool SynchronizeSupertrendCache(const MqlRates &current_bar,
    g_st_committed_time=previous_bar.time; g_st_active_time=current_bar.time;
    return true;
   }
-bool ReadAdaptiveSignal(ScoreSnapshot &snapshot)
+bool ReadAdaptiveSignal(ScoreSnapshot &snapshot,const MqlTick &tick)
   {
    if(BarsCalculated(g_fast_ema_handle)<2 ||
       BarsCalculated(g_slow_ema_handle)<1 ||
@@ -342,23 +345,40 @@ bool ReadAdaptiveSignal(ScoreSnapshot &snapshot)
       CopyBuffer(g_slow_ema_handle,0,0,1,slow)!=1 ||
       CopyBuffer(g_rsi_handle,0,0,1,rsi)!=1)
      { g_status="M5数据复制未完成"; return false; }
+   int tick_bar_shift=iBarShift(g_symbol,PERIOD_M5,(datetime)tick.time,true);
+   if(tick_bar_shift!=0 ||
+      iTime(g_symbol,PERIOD_M5,tick_bar_shift)!=rates[0].time)
+     { g_status="M5报价与K线不同步"; return false; }
    if(!SynchronizeSupertrendCache(rates[0],rates[1],atr[1])) return false;
    double supertrend_line=0.0;
    if(!PreviewCurrentSupertrend(rates[0],atr[0],supertrend_line)) return false;
-   MqlTick tick; if(!SymbolInfoTick(g_symbol,tick)) return false;
    double price=tick.bid;
    if(!MathIsValidNumber(fast[0]) || !MathIsValidNumber(fast[1]) ||
       !MathIsValidNumber(slow[0]) || !MathIsValidNumber(atr[0]) ||
       !MathIsValidNumber(rsi[0]) || !MathIsValidNumber(price) ||
       !MathIsValidNumber(supertrend_line) || atr[0]<=0.0 || price<=0.0)
      { g_status="M5评分数据无效"; return false; }
+   double ema_distance_denominator=InpEmaDistanceAtrScale*atr[0];
+   double ema_slope_denominator=InpEmaSlopeAtrScale*atr[0];
+   double supertrend_denominator=InpSupertrendAtrScale*atr[0];
+   if(!MathIsValidNumber(ema_distance_denominator) ||
+      !MathIsValidNumber(ema_slope_denominator) ||
+      !MathIsValidNumber(supertrend_denominator) ||
+      ema_distance_denominator<=0.0 || ema_slope_denominator<=0.0 ||
+      supertrend_denominator<=0.0)
+     { g_status="M5评分标准化无效"; return false; }
+   double ema_distance_ratio=(fast[0]-slow[0])/ema_distance_denominator;
+   double ema_slope_ratio=(fast[0]-fast[1])/ema_slope_denominator;
+   double supertrend_ratio=(price-supertrend_line)/supertrend_denominator;
+   if(!MathIsValidNumber(ema_distance_ratio) ||
+      !MathIsValidNumber(ema_slope_ratio) ||
+      !MathIsValidNumber(supertrend_ratio))
+     { g_status="M5评分比例无效"; return false; }
    snapshot.ema_score=
-      InpEmaDistanceWeight*
-      ClampUnit((fast[0]-slow[0])/(InpEmaDistanceAtrScale*atr[0]))+
-      InpEmaSlopeWeight*
-      ClampUnit((fast[0]-fast[1])/(InpEmaSlopeAtrScale*atr[0]));
+      InpEmaDistanceWeight*ClampUnit(ema_distance_ratio)+
+      InpEmaSlopeWeight*ClampUnit(ema_slope_ratio);
    snapshot.supertrend_score=InpSupertrendWeight*
-      ClampUnit((price-supertrend_line)/(InpSupertrendAtrScale*atr[0]));
+      ClampUnit(supertrend_ratio);
    snapshot.rsi_score=0.0;
    if(rsi[0]>InpRsiNeutralUpper)
       snapshot.rsi_score=InpRsiWeight*
@@ -876,7 +896,6 @@ bool IsNewTargetTick(MqlTick &tick)
   {
    if(!SymbolInfoTick(g_symbol,tick)) return false;
    if(tick.time_msc==g_last_tick_time_msc && tick.bid==g_last_tick_bid && tick.ask==g_last_tick_ask) return false;
-   g_last_tick_time_msc=tick.time_msc; g_last_tick_bid=tick.bid; g_last_tick_ask=tick.ask;
    return true;
   }
 void MaybeSendStartupTest()
@@ -923,18 +942,21 @@ void OnTimer()
    UpdateLargeNotification();
    if(!g_runtime_ready)
      { TryInitializeRuntime(); RenderPanel(); if(!g_runtime_ready) return; }
-   MqlTick tick; if(!IsNewTargetTick(tick)) return;
+   MqlTick decision_tick; if(!IsNewTargetTick(decision_tick)) return;
    if(g_previous_server_tick_msc>0 &&
-      (tick.time_msc<g_previous_server_tick_msc ||
-       tick.time_msc-g_previous_server_tick_msc>
+      (decision_tick.time_msc<g_previous_server_tick_msc ||
+       decision_tick.time_msc-g_previous_server_tick_msc>
        (long)InpReconnectResetSeconds*1000))
      {
       ResetSignalState(); g_st_cache_ready=false; g_st_active_time=0;
       if(!InitializeSupertrendCache()) { RenderPanel(); return; }
       g_status="报价恢复，静默重建基准";
      }
-   g_previous_server_tick_msc=tick.time_msc;
-   ScoreSnapshot s; if(!ReadAdaptiveSignal(s)) { RenderPanel(); return; }
+   ScoreSnapshot s;
+   if(!ReadAdaptiveSignal(s,decision_tick)) { RenderPanel(); return; }
+   g_last_tick_time_msc=decision_tick.time_msc;
+   g_last_tick_bid=decision_tick.bid; g_last_tick_ask=decision_tick.ask;
+   g_previous_server_tick_msc=decision_tick.time_msc;
    g_snapshot=s; g_has_snapshot=true;
    int previous=g_confirmed_direction;
    bool confirmed=AdvanceAdaptiveState(s.total_score,GetTickCount64());
