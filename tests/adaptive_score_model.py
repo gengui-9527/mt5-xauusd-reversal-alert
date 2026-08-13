@@ -6,6 +6,7 @@ EMA_DISTANCE_WEIGHT = 25.0
 EMA_SLOPE_WEIGHT = 10.0
 SUPERTREND_WEIGHT = 40.0
 RSI_WEIGHT = 25.0
+SCORE_COMPARISON_TOLERANCE = 1e-9
 
 
 @dataclass(frozen=True)
@@ -178,9 +179,9 @@ def required_seconds(score: float) -> float:
 
 
 def _score_direction(score: float, threshold: float) -> int:
-    if score >= threshold:
+    if score >= threshold - SCORE_COMPARISON_TOLERANCE:
         return 1
-    if score <= -threshold:
+    if score <= -threshold + SCORE_COMPARISON_TOLERANCE:
         return -1
     return 0
 

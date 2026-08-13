@@ -9,6 +9,10 @@ from pathlib import Path
 
 from tools.compare_adaptive_replay import (
     Alert,
+    LegacySnapshot,
+    _LegacyState,
+    _advance_legacy,
+    _legacy_vote,
     build_report,
     compare_replay,
     interrupted_range_trace,
@@ -97,6 +101,110 @@ class AdaptiveReplayTests(unittest.TestCase):
             },
             {rows[1].time},
         )
+
+    def test_legacy_indicators_are_independent_and_warm_up_before_voting(self):
+        result = compare_replay(load_fixture(FIXTURE))
+        self.assertTrue(
+            hasattr(result, "legacy_snapshots"),
+            "ReplayResult must expose independent legacy indicator snapshots",
+        )
+        snapshots = result.legacy_snapshots
+
+        self.assertEqual(len(snapshots), 120)
+        self.assertFalse(any(snapshot.ready for snapshot in snapshots[:20]))
+        self.assertTrue(snapshots[20].ready)
+        self.assertAlmostEqual(snapshots[20].fast_ema, 2006.4184467440741)
+        self.assertAlmostEqual(snapshots[20].slow_ema, 2004.5945745120962)
+        self.assertAlmostEqual(snapshots[20].atr, 1.2)
+        self.assertAlmostEqual(snapshots[20].rsi, 100.0)
+        self.assertAlmostEqual(snapshots[20].supertrend_line, 2004.4)
+        self.assertEqual(snapshots[20].direction, 1)
+
+        self.assertAlmostEqual(snapshots[30].atr, 1.580000000000007)
+        self.assertAlmostEqual(snapshots[30].rsi, 56.52173913043438)
+        self.assertAlmostEqual(snapshots[30].supertrend_line, 2014.24)
+        self.assertFalse(snapshots[30].long_trend)
+        self.assertAlmostEqual(snapshots[33].rsi, 49.08316004743223)
+        self.assertEqual(snapshots[33].direction, -1)
+        self.assertAlmostEqual(
+            snapshots[80].supertrend_line, 1987.2741246962637
+        )
+        self.assertTrue(snapshots[80].long_trend)
+
+    def test_adaptive_only_fixture_columns_cannot_change_legacy_replay(self):
+        rows = load_fixture(FIXTURE)
+        baseline = compare_replay(rows)
+        changed = compare_replay(
+            [
+                replace(
+                    row,
+                    fast=row.slow + 50.0,
+                    slow=row.fast - 50.0,
+                    previous_fast=row.previous_fast + 75.0,
+                    rsi=100.0 - row.rsi,
+                )
+                for row in rows
+            ]
+        )
+
+        self.assertTrue(
+            hasattr(baseline, "legacy_snapshots"),
+            "ReplayResult must expose independent legacy indicator snapshots",
+        )
+        self.assertEqual(changed.legacy_snapshots, baseline.legacy_snapshots)
+        self.assertEqual(changed.legacy_alerts, baseline.legacy_alerts)
+
+    def test_faithful_legacy_replay_has_expected_reversal_directions_and_times(self):
+        result = compare_replay(load_fixture(FIXTURE))
+
+        self.assertEqual(
+            result.legacy_alerts,
+            (
+                Alert("top_reversal", 1_704_077_110, -1, 10),
+                Alert("v_reversal", 1_704_091_210, 1, 10),
+            ),
+        )
+        self.assertEqual(result.legacy_range_alert_count, 0)
+
+    def test_legacy_supertrend_line_equality_is_a_neutral_vote(self):
+        self.assertIn(
+            "supertrend_vote",
+            LegacySnapshot.__dataclass_fields__,
+            "legacy snapshot must retain the close-versus-line vote",
+        )
+        snapshot = LegacySnapshot(
+            segment="equality",
+            row_time=1,
+            ready=True,
+            fast_ema=2.0,
+            slow_ema=1.0,
+            atr=1.0,
+            rsi=40.0,
+            supertrend_line=1.5,
+            long_trend=True,
+            supertrend_vote=0,
+            direction=0,
+        )
+
+        self.assertEqual(_legacy_vote(snapshot), 0)
+
+    def test_legacy_hold_counts_active_seconds_not_inactive_wall_clock(self):
+        state = _LegacyState()
+        state, alerted = _advance_legacy(state, 1, 0)
+        self.assertFalse(alerted)
+        state, alerted = _advance_legacy(state, -1, 1)
+        self.assertFalse(alerted)
+
+        state, alerted = _advance_legacy(state, -1, 301)
+        self.assertFalse(alerted)
+        self.assertEqual(state.confirmed, 1)
+
+        for now in range(302, 311):
+            state, alerted = _advance_legacy(state, -1, now)
+            self.assertFalse(alerted)
+        state, alerted = _advance_legacy(state, -1, 311)
+        self.assertTrue(alerted)
+        self.assertEqual(state.confirmed, -1)
 
     def test_committing_prior_bar_at_next_m5_boundary_changes_next_preview(self):
         rows = load_fixture(FIXTURE)[:2]

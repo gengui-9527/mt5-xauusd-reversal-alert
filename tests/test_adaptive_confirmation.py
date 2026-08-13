@@ -108,6 +108,65 @@ class AdaptiveConfirmationTests(unittest.TestCase):
         self.assertEqual(state.confirmed, 1)
         self.assertFalse(alerted)
 
+    def test_entry_threshold_uses_symmetric_score_tolerance(self):
+        tolerance = 1e-9
+        cases = (
+            (55.0 - tolerance / 2.0, -1, 1),
+            (-55.0 + tolerance / 2.0, 1, -1),
+            (55.0 - tolerance * 2.0, -1, 0),
+            (-55.0 + tolerance * 2.0, 1, 0),
+        )
+        for score, confirmed, expected_pending in cases:
+            with self.subTest(score=score):
+                state = ConfirmationState(
+                    confirmed=confirmed,
+                    last_tick_ms=1_000,
+                    has_last_tick=True,
+                )
+                state, alerted = advance_confirmation(state, score, 2_000)
+                self.assertEqual(state.pending, expected_pending)
+                self.assertFalse(alerted)
+
+    def test_maintenance_threshold_uses_symmetric_score_tolerance(self):
+        tolerance = 1e-9
+        cases = (
+            (-35.0 + tolerance / 2.0, -1, 0.55),
+            (35.0 - tolerance / 2.0, 1, 0.55),
+            (-35.0 + tolerance * 2.0, -1, 0.50),
+            (35.0 - tolerance * 2.0, 1, 0.50),
+        )
+        for score, pending, expected_progress in cases:
+            with self.subTest(score=score):
+                state = ConfirmationState(
+                    confirmed=-pending,
+                    pending=pending,
+                    progress=0.60,
+                    last_tick_ms=1_000,
+                    has_last_tick=True,
+                )
+                state, alerted = advance_confirmation(state, score, 2_000)
+                self.assertEqual(state.pending, pending)
+                self.assertAlmostEqual(state.progress, expected_progress)
+                self.assertFalse(alerted)
+
+        opposite_cases = (
+            (35.0 - tolerance / 2.0, -1),
+            (-35.0 + tolerance / 2.0, 1),
+        )
+        for score, pending in opposite_cases:
+            with self.subTest(opposite_score=score):
+                state = ConfirmationState(
+                    confirmed=pending,
+                    pending=pending,
+                    progress=0.60,
+                    last_tick_ms=1_000,
+                    has_last_tick=True,
+                )
+                state, alerted = advance_confirmation(state, score, 2_000)
+                self.assertEqual(state.pending, 0)
+                self.assertEqual(state.progress, 0.0)
+                self.assertFalse(alerted)
+
     def test_confirmed_direction_never_repeats_an_alert(self):
         state = ConfirmationState(confirmed=1, last_tick_ms=1_000, has_last_tick=True)
 

@@ -88,6 +88,7 @@ class ReplayResult:
     adaptive_range_alert_count: int
     duplicate_adaptive_directions: tuple[int, ...]
     observations: tuple["ReplayObservation", ...]
+    legacy_snapshots: tuple["LegacySnapshot", ...]
 
 
 @dataclass(frozen=True)
@@ -112,11 +113,28 @@ class ConfirmationTracePoint:
     alerted: bool
 
 
+@dataclass(frozen=True)
+class LegacySnapshot:
+    segment: str
+    row_time: int
+    ready: bool
+    fast_ema: float | None
+    slow_ema: float | None
+    atr: float | None
+    rsi: float | None
+    supertrend_line: float | None
+    long_trend: bool | None
+    supertrend_vote: int
+    direction: int
+
+
 @dataclass
 class _LegacyState:
     confirmed: int = 0
     pending: int = 0
-    pending_since: int = 0
+    pending_elapsed: int = 0
+    last_tick: int = 0
+    has_last_tick: bool = False
 
 
 def load_fixture(path: Path | str = DEFAULT_FIXTURE) -> list[ReplayRow]:
@@ -142,10 +160,163 @@ def load_fixture(path: Path | str = DEFAULT_FIXTURE) -> list[ReplayRow]:
         ]
 
 
-def _legacy_vote(row: ReplayRow, long_trend: bool) -> int:
-    ema = (row.fast > row.slow) - (row.fast < row.slow)
-    supertrend = 1 if long_trend else -1
-    rsi = (row.rsi > 52.0) - (row.rsi < 48.0)
+def _ema_series(rows: list[ReplayRow], period: int) -> list[float | None]:
+    values: list[float | None] = [None] * len(rows)
+    if not rows:
+        return values
+    alpha = 2.0 / (period + 1.0)
+    ema = rows[0].close
+    if period == 1:
+        values[0] = ema
+    for index in range(1, len(rows)):
+        ema = alpha * rows[index].close + (1.0 - alpha) * ema
+        if index >= period - 1:
+            values[index] = ema
+    return values
+
+
+def _atr_series(rows: list[ReplayRow], period: int) -> list[float | None]:
+    values: list[float | None] = [None] * len(rows)
+    if len(rows) < period:
+        return values
+    true_ranges = []
+    for index, row in enumerate(rows):
+        previous_close = rows[index - 1].close if index else row.close
+        true_ranges.append(
+            max(
+                row.high - row.low,
+                abs(row.high - previous_close),
+                abs(row.low - previous_close),
+            )
+        )
+    atr = sum(true_ranges[:period]) / period
+    values[period - 1] = atr
+    for index in range(period, len(rows)):
+        atr = (atr * (period - 1) + true_ranges[index]) / period
+        values[index] = atr
+    return values
+
+
+def _rsi_series(rows: list[ReplayRow], period: int) -> list[float | None]:
+    values: list[float | None] = [None] * len(rows)
+    if len(rows) <= period:
+        return values
+    changes = [
+        rows[index].close - rows[index - 1].close
+        for index in range(1, len(rows))
+    ]
+    average_gain = sum(max(change, 0.0) for change in changes[:period]) / period
+    average_loss = sum(max(-change, 0.0) for change in changes[:period]) / period
+
+    def current_rsi() -> float:
+        if average_loss == 0.0:
+            return 100.0 if average_gain > 0.0 else 50.0
+        if average_gain == 0.0:
+            return 0.0
+        relative_strength = average_gain / average_loss
+        return 100.0 - 100.0 / (1.0 + relative_strength)
+
+    values[period] = current_rsi()
+    for index in range(period + 1, len(rows)):
+        change = changes[index - 1]
+        average_gain = (
+            average_gain * (period - 1) + max(change, 0.0)
+        ) / period
+        average_loss = (
+            average_loss * (period - 1) + max(-change, 0.0)
+        ) / period
+        values[index] = current_rsi()
+    return values
+
+
+def _legacy_snapshots(rows: list[ReplayRow]) -> tuple[LegacySnapshot, ...]:
+    fast = _ema_series(rows, 9)
+    slow = _ema_series(rows, 21)
+    atr = _atr_series(rows, 10)
+    rsi = _rsi_series(rows, 14)
+    lines: list[float | None] = [None] * len(rows)
+    trends: list[bool | None] = [None] * len(rows)
+    upper = lower = previous_close = 0.0
+    long_trend = False
+    initialized = False
+    for index, row in enumerate(rows):
+        row_atr = atr[index]
+        if row_atr is None:
+            continue
+        midpoint = (row.high + row.low) * 0.5
+        basic_upper = midpoint + 3.0 * row_atr
+        basic_lower = midpoint - 3.0 * row_atr
+        if not initialized:
+            upper = basic_upper
+            lower = basic_lower
+            long_trend = row.close >= midpoint
+            initialized = True
+        else:
+            final_upper = (
+                upper
+                if basic_upper >= upper and previous_close <= upper
+                else basic_upper
+            )
+            final_lower = (
+                lower
+                if basic_lower <= lower and previous_close >= lower
+                else basic_lower
+            )
+            if long_trend and row.close < final_lower:
+                long_trend = False
+            elif not long_trend and row.close > final_upper:
+                long_trend = True
+            upper = final_upper
+            lower = final_lower
+        previous_close = row.close
+        trends[index] = long_trend
+        lines[index] = lower if long_trend else upper
+
+    snapshots = []
+    for index, row in enumerate(rows):
+        ready = all(
+            value is not None
+            for value in (fast[index], slow[index], atr[index], rsi[index], lines[index])
+        )
+        supertrend_vote = 0
+        direction = 0
+        if ready:
+            ema_vote = (fast[index] > slow[index]) - (fast[index] < slow[index])
+            supertrend_vote = (row.close > lines[index]) - (
+                row.close < lines[index]
+            )
+            rsi_vote = (rsi[index] > 50.0) - (rsi[index] < 50.0)
+            votes = (ema_vote, supertrend_vote, rsi_vote)
+            if sum(vote == 1 for vote in votes) >= 2:
+                direction = 1
+            elif sum(vote == -1 for vote in votes) >= 2:
+                direction = -1
+        snapshots.append(
+            LegacySnapshot(
+                row.segment,
+                row.time,
+                ready,
+                fast[index],
+                slow[index],
+                atr[index],
+                rsi[index],
+                lines[index],
+                trends[index],
+                supertrend_vote,
+                direction,
+            )
+        )
+    return tuple(snapshots)
+
+
+def _legacy_vote(snapshot: LegacySnapshot) -> int:
+    if not snapshot.ready:
+        return 0
+    ema = (snapshot.fast_ema > snapshot.slow_ema) - (
+        snapshot.fast_ema < snapshot.slow_ema
+    )
+    supertrend = snapshot.supertrend_vote
+    rsi = (snapshot.rsi > 50.0) - (snapshot.rsi < 50.0)
     votes = (ema, supertrend, rsi)
     if sum(vote == 1 for vote in votes) >= 2:
         return 1
@@ -162,16 +333,27 @@ def _advance_legacy(
         return state, False
     if direction == 0 or direction == state.confirmed:
         state.pending = 0
-        state.pending_since = 0
+        state.pending_elapsed = 0
+        state.last_tick = 0
+        state.has_last_tick = False
         return state, False
     if direction != state.pending:
         state.pending = direction
-        state.pending_since = now
+        state.pending_elapsed = 0
+        state.last_tick = now
+        state.has_last_tick = True
         return state, False
-    if now - state.pending_since >= 10:
+    delta = now - state.last_tick if state.has_last_tick and now >= state.last_tick else 0
+    if delta <= 1:
+        state.pending_elapsed += delta
+    state.last_tick = now
+    state.has_last_tick = True
+    if state.pending_elapsed >= 10:
         state.confirmed = direction
         state.pending = 0
-        state.pending_since = 0
+        state.pending_elapsed = 0
+        state.last_tick = 0
+        state.has_last_tick = False
         return state, True
     return state, False
 
@@ -253,6 +435,7 @@ def compare_replay(rows: Iterable[ReplayRow]) -> ReplayResult:
     if not rows:
         raise ValueError("replay fixture must contain rows")
 
+    legacy_snapshots = _legacy_snapshots(rows)
     supertrend_state = None
     legacy_state = _LegacyState()
     adaptive_state = ConfirmationState()
@@ -262,7 +445,7 @@ def compare_replay(rows: Iterable[ReplayRow]) -> ReplayResult:
     previous_row: ReplayRow | None = None
     adaptive_pending_started_ms: int | None = None
 
-    for row in rows:
+    for row, legacy_snapshot in zip(rows, legacy_snapshots):
         if previous_row is not None:
             supertrend_state, _ = advance_supertrend(
                 supertrend_state, previous_row.bar()
@@ -272,7 +455,7 @@ def compare_replay(rows: Iterable[ReplayRow]) -> ReplayResult:
         # one-second intervals, including both boundaries of the hold.
         for offset in range(11):
             preview_state, line = preview_supertrend(supertrend_state, row.bar())
-            legacy_direction = _legacy_vote(row, preview_state.long_trend)
+            legacy_direction = _legacy_vote(legacy_snapshot)
             score = composite_score(
                 row.fast,
                 row.slow,
@@ -345,6 +528,7 @@ def compare_replay(rows: Iterable[ReplayRow]) -> ReplayResult:
         adaptive_range_count,
         _duplicate_directions(adaptive_alerts),
         tuple(observations),
+        legacy_snapshots,
     )
 
 

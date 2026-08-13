@@ -62,8 +62,22 @@ struct ScoreSnapshot
    datetime server_time;
   };
 
+struct SupertrendBarIdentity
+  {
+   datetime time;
+   double open,high,low,close,atr;
+  };
+
+enum SupertrendAuditResult
+  {
+   ST_AUDIT_RETRY=0,
+   ST_AUDIT_MATCH=1,
+   ST_AUDIT_MISMATCH=2
+  };
+
 const int MAX_INDICATOR_PERIOD=500;
 const int MAX_HISTORY_BARS=5000;
+const double SCORE_COMPARISON_TOLERANCE=1e-9;
 string g_symbol="",g_status="正在初始化",g_push_status="未发送";
 string g_sound_warning="",g_push_warning="";
 string g_panel_prefix="";
@@ -77,9 +91,9 @@ ulong g_last_confirmation_tick_ms=0;
 bool g_has_last_confirmation_tick=false;
 bool g_st_cache_ready=false,g_st_long_trend=false;
 double g_st_final_upper=0.0,g_st_final_lower=0.0,g_st_previous_close=0.0;
-double g_st_committed_open=0.0,g_st_committed_high=0.0;
-double g_st_committed_low=0.0,g_st_committed_atr=0.0;
 datetime g_st_committed_time=0,g_st_active_time=0;
+SupertrendBarIdentity g_st_history[];
+int g_st_history_count=0;
 long g_last_tick_time_msc=0,g_previous_server_tick_msc=0;
 double g_last_tick_bid=0.0,g_last_tick_ask=0.0;
 MqlTick g_decision_tick;
@@ -249,15 +263,104 @@ bool AdvanceSupertrendValues(const MqlRates &bar,const double atr,
      }
    previous_close=bar.close;
    return true;
+   }
+bool BuildSupertrendIdentity(const MqlRates &bar,const double atr,
+                             SupertrendBarIdentity &identity)
+  {
+   if(bar.time<=0 || !MathIsValidNumber(bar.open) ||
+      !MathIsValidNumber(bar.high) || !MathIsValidNumber(bar.low) ||
+      !MathIsValidNumber(bar.close) || !MathIsValidNumber(atr) || atr<=0.0)
+      return false;
+   identity.time=bar.time;
+   identity.open=bar.open; identity.high=bar.high;
+   identity.low=bar.low; identity.close=bar.close; identity.atr=atr;
+   return true;
+  }
+bool MatchesSupertrendIdentity(const SupertrendBarIdentity &identity,
+                               const MqlRates &bar,const double atr)
+  {
+   return identity.time==bar.time &&
+          identity.open==bar.open && identity.high==bar.high &&
+          identity.low==bar.low && identity.close==bar.close &&
+          identity.atr==atr;
+  }
+SupertrendAuditResult AuditSupertrendHistory(
+   const MqlRates &current_bar,const MqlRates &previous_bar,const double previous_atr,
+   SupertrendBarIdentity &new_identity)
+  {
+   int audit_count=g_st_history_count+1;
+   if(audit_count<2 || audit_count>MAX_HISTORY_BARS)
+      return ST_AUDIT_MISMATCH;
+   if(BarsCalculated(g_atr_handle)<audit_count+1)
+      return ST_AUDIT_RETRY;
+   MqlRates audit_rates[]; double audit_atr[];
+   ArraySetAsSeries(audit_rates,false);
+   ArraySetAsSeries(audit_atr,false);
+   if(CopyRates(g_symbol,PERIOD_M5,1,audit_count,audit_rates)!=audit_count ||
+      CopyBuffer(g_atr_handle,0,1,audit_count,audit_atr)!=audit_count)
+      return ST_AUDIT_RETRY;
+    for(int i=0;i<audit_count;i++)
+      {
+      if(audit_rates[i].time<=0 ||
+         (i>0 && audit_rates[i].time<=audit_rates[i-1].time) ||
+         !MathIsValidNumber(audit_atr[i]) || audit_atr[i]<=0.0)
+         return ST_AUDIT_RETRY;
+      }
+   MqlTick audit_tick;
+   if(!SymbolInfoTick(g_symbol,audit_tick) ||
+      audit_tick.time_msc!=g_decision_tick.time_msc ||
+      audit_tick.bid!=g_decision_tick.bid ||
+      audit_tick.ask!=g_decision_tick.ask)
+      return ST_AUDIT_RETRY;
+   int audit_bar_shift=iBarShift(g_symbol,PERIOD_M5,
+                                 (datetime)g_decision_tick.time,true);
+   if(audit_bar_shift!=0 ||
+      iTime(g_symbol,PERIOD_M5,audit_bar_shift)!=current_bar.time)
+      return ST_AUDIT_RETRY;
+   for(int i=0;i<g_st_history_count;i++)
+      if(!MatchesSupertrendIdentity(g_st_history[i],audit_rates[i],audit_atr[i]))
+         return ST_AUDIT_MISMATCH;
+   int new_index=audit_count-1;
+   if(audit_rates[new_index].time!=previous_bar.time ||
+      audit_rates[new_index].open!=previous_bar.open ||
+      audit_rates[new_index].high!=previous_bar.high ||
+      audit_rates[new_index].low!=previous_bar.low ||
+      audit_rates[new_index].close!=previous_bar.close ||
+      audit_atr[new_index]!=previous_atr)
+      return ST_AUDIT_RETRY;
+   if(!BuildSupertrendIdentity(audit_rates[new_index],audit_atr[new_index],
+                               new_identity))
+      return ST_AUDIT_RETRY;
+    return ST_AUDIT_MATCH;
+   }
+bool PublishSupertrendCache(const SupertrendBarIdentity &staged_history[],
+                            const int count,const double upper,
+                            const double lower,const bool long_trend,
+                            const double previous_close,
+                            const datetime committed_time)
+  {
+   if(ArrayResize(g_st_history,MAX_HISTORY_BARS)!=MAX_HISTORY_BARS)
+     { g_status="M5历史标识缓存未就绪"; return false; }
+   for(int i=0;i<count;i++)
+      g_st_history[i]=staged_history[i];
+   g_st_history_count=count;
+   g_st_final_upper=upper; g_st_final_lower=lower;
+   g_st_long_trend=long_trend; g_st_previous_close=previous_close;
+   g_st_committed_time=committed_time; g_st_active_time=0;
+   g_st_cache_ready=true;
+   ResetSignalState();
+   return true;
   }
 bool InitializeSupertrendCache()
   {
-   ResetSignalState();
    int count=RequiredHistoryBars();
    if(BarsCalculated(g_atr_handle)<count+1)
      { g_status="等待M5历史数据"; return false; }
    MqlRates rates[]; double atr[];
+   SupertrendBarIdentity staged_history[];
    ArraySetAsSeries(rates,false); ArraySetAsSeries(atr,false);
+   if(ArrayResize(staged_history,count)!=count)
+      { g_status="M5历史标识缓存未就绪"; return false; }
    if(CopyRates(g_symbol,PERIOD_M5,1,count,rates)!=count ||
       CopyBuffer(g_atr_handle,0,1,count,atr)!=count)
      { g_status="M5历史缓存未就绪"; return false; }
@@ -266,22 +369,18 @@ bool InitializeSupertrendCache()
    datetime committed_time=0;
    for(int i=0;i<count;i++)
      {
+      if((i>0 && rates[i].time<=rates[i-1].time) ||
+         !BuildSupertrendIdentity(rates[i],atr[i],staged_history[i]))
+         return false;
       if(!AdvanceSupertrendValues(rates[i],atr[i],upper,lower,long_trend,
                                   previous_close,initialized))
          return false;
       initialized=true; committed_time=rates[i].time;
      }
    if(!initialized) return false;
-   g_st_final_upper=upper; g_st_final_lower=lower;
-   g_st_long_trend=long_trend; g_st_previous_close=previous_close;
-   g_st_committed_open=rates[count-1].open;
-   g_st_committed_high=rates[count-1].high;
-   g_st_committed_low=rates[count-1].low;
-   g_st_committed_atr=atr[count-1];
-   g_st_committed_time=committed_time; g_st_active_time=0;
-   g_st_cache_ready=true;
-   return true;
-  }
+   return PublishSupertrendCache(staged_history,count,upper,lower,long_trend,
+                                 previous_close,committed_time);
+   }
 bool PreviewCurrentSupertrend(const MqlRates &bar,const double atr,double &line)
   {
    if(!g_st_cache_ready || bar.time<=g_st_committed_time) return false;
@@ -304,29 +403,25 @@ bool SynchronizeSupertrendCache(const MqlRates &current_bar,
       return InitializeSupertrendCache();
    if(g_st_active_time==0)
      {
-      if(previous_bar.time!=g_st_committed_time ||
-         previous_bar.open!=g_st_committed_open ||
-         previous_bar.high!=g_st_committed_high ||
-         previous_bar.low!=g_st_committed_low ||
-         previous_bar.close!=g_st_previous_close ||
-         previous_atr!=g_st_committed_atr)
+      if(g_st_history_count<1 ||
+         !MatchesSupertrendIdentity(g_st_history[g_st_history_count-1],
+                                    previous_bar,previous_atr))
          return InitializeSupertrendCache();
       g_st_active_time=current_bar.time;
       return true;
      }
    if(current_bar.time==g_st_active_time)
-     {
-      if(previous_bar.time!=g_st_committed_time ||
-         previous_bar.open!=g_st_committed_open ||
-         previous_bar.high!=g_st_committed_high ||
-         previous_bar.low!=g_st_committed_low ||
-         previous_bar.close!=g_st_previous_close ||
-         previous_atr!=g_st_committed_atr)
-         return InitializeSupertrendCache();
       return true;
-     }
    if(previous_bar.time!=g_st_active_time ||
       previous_bar.time<=g_st_committed_time)
+      return InitializeSupertrendCache();
+   if(g_st_history_count>=MAX_HISTORY_BARS)
+      return InitializeSupertrendCache();
+    SupertrendBarIdentity new_identity;
+    SupertrendAuditResult audit_result=
+      AuditSupertrendHistory(current_bar,previous_bar,previous_atr,new_identity);
+   if(audit_result==ST_AUDIT_RETRY) return false;
+   if(audit_result==ST_AUDIT_MISMATCH)
       return InitializeSupertrendCache();
    double upper=g_st_final_upper,lower=g_st_final_lower;
    double previous_close=g_st_previous_close;
@@ -334,12 +429,10 @@ bool SynchronizeSupertrendCache(const MqlRates &current_bar,
    if(!AdvanceSupertrendValues(previous_bar,previous_atr,upper,lower,
                                long_trend,previous_close,true))
       return false;
+   g_st_history[g_st_history_count]=new_identity;
+   g_st_history_count++;
    g_st_final_upper=upper; g_st_final_lower=lower;
    g_st_long_trend=long_trend; g_st_previous_close=previous_close;
-   g_st_committed_open=previous_bar.open;
-   g_st_committed_high=previous_bar.high;
-   g_st_committed_low=previous_bar.low;
-   g_st_committed_atr=previous_atr;
    g_st_committed_time=previous_bar.time; g_st_active_time=current_bar.time;
    return true;
   }
@@ -371,11 +464,11 @@ bool ReadAdaptiveSignal(ScoreSnapshot &snapshot)
    if(tick_bar_shift!=0 ||
       iTime(g_symbol,PERIOD_M5,tick_bar_shift)!=rates[0].time)
      { g_status="M5报价与K线不同步"; return false; }
-   if(reconnect_reset)
-     {
-      ResetSignalState(); g_st_cache_ready=false; g_st_active_time=0;
-      g_status="报价恢复，静默重建基准";
-     }
+    if(reconnect_reset)
+      {
+       ResetSignalState(); g_st_cache_ready=false; g_st_active_time=0;
+       g_status="报价恢复，静默重建基准";
+      }
    if(!SynchronizeSupertrendCache(rates[0],rates[1],atr[1])) return false;
    double supertrend_line=0.0;
    if(!PreviewCurrentSupertrend(rates[0],atr[0],supertrend_line)) return false;
@@ -443,8 +536,8 @@ double RequiredConfirmationSeconds(const double score)
   }
 int ScoreDirection(const double score,const double threshold)
   {
-   if(score>=threshold) return DIR_LONG;
-   if(score<=-threshold) return DIR_SHORT;
+   if(score>=threshold-SCORE_COMPARISON_TOLERANCE) return DIR_LONG;
+   if(score<=-threshold+SCORE_COMPARISON_TOLERANCE) return DIR_SHORT;
    return DIR_NONE;
   }
 bool AdvanceAdaptiveState(const double score,const ulong now_ms)

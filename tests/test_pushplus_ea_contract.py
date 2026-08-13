@@ -396,6 +396,34 @@ class PushPlusEaContractTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIn(text, scoring[verify_fetch_pos:cache_pos])
 
+    def test_new_m5_history_audit_rechecks_tick_and_bar_before_classification(self):
+        scoring = self.function_source(
+            "bool ReadAdaptiveSignal(ScoreSnapshot &snapshot)"
+        )
+        cache_pos = scoring.index("SynchronizeSupertrendCache(")
+        preview_pos = scoring.index("PreviewCurrentSupertrend(", cache_pos)
+        self.assertNotIn("post_cache_tick", scoring[cache_pos:preview_pos])
+
+        audit = self.function_source(
+            "SupertrendAuditResult AuditSupertrendHistory("
+        )
+        fetch_pos = audit.index(
+            "SymbolInfoTick(g_symbol,audit_tick)"
+        )
+        identity_pos = audit.index(
+            "audit_tick.time_msc!=g_decision_tick.time_msc", fetch_pos
+        )
+        bar_pos = audit.index(
+            "iTime(g_symbol,PERIOD_M5,audit_bar_shift)!=current_bar.time",
+            identity_pos,
+        )
+        compare_pos = audit.index(
+            "for(int i=0;i<g_st_history_count;i++)"
+        )
+        self.assertLess(fetch_pos, identity_pos)
+        self.assertLess(identity_pos, bar_pos)
+        self.assertLess(bar_pos, compare_pos)
+
     def test_reconnect_reset_mutates_state_only_after_tick_stability(self):
         scoring = self.function_source(
             "bool ReadAdaptiveSignal(ScoreSnapshot &snapshot)"
@@ -443,22 +471,126 @@ class PushPlusEaContractTests(unittest.TestCase):
             with self.subTest(cached_name=cached_name):
                 self.assertNotIn(cached_name, preview)
 
+    def test_supertrend_history_identity_ledger_is_bounded_and_initialized(self):
+        self.assertIn("struct SupertrendBarIdentity", self.source)
+        identity_start = self.source.index("struct SupertrendBarIdentity")
+        identity_end = self.source.index("};", identity_start)
+        identity = self.source[identity_start:identity_end]
+        for field in ("time", "open", "high", "low", "close", "atr"):
+            with self.subTest(field=field):
+                self.assertRegex(identity, rf"\b{field}\b")
+        self.assertIn("SupertrendBarIdentity g_st_history[];", self.source)
+        self.assertIn("int g_st_history_count=0;", self.source)
+
+        initialize = self.function_source("bool InitializeSupertrendCache()")
+        for text in (
+            "SupertrendBarIdentity staged_history[];",
+            "ArrayResize(staged_history,count)!=count",
+            "BuildSupertrendIdentity(rates[i],atr[i],staged_history[i])",
+            "PublishSupertrendCache(staged_history,count,upper,lower,long_trend,",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, initialize)
+        publish = self.function_source("bool PublishSupertrendCache(")
+        publish_pos = publish.index("g_st_history_count=count;")
+        reset_pos = publish.index("ResetSignalState();")
+        self.assertLess(publish_pos, reset_pos)
+
+    def test_supertrend_audit_is_new_m5_only_and_compares_full_ledger(self):
+        synchronize = self.function_source("bool SynchronizeSupertrendCache(")
+        same_m5 = "if(current_bar.time==g_st_active_time)\n      return true;"
+        self.assertIn(same_m5, synchronize)
+        self.assertIn("if(g_st_history_count>=MAX_HISTORY_BARS)", synchronize)
+        self.assertIn("AuditSupertrendHistory(", synchronize)
+        self.assertIn("ST_AUDIT_MISMATCH", synchronize)
+        self.assertIn("return InitializeSupertrendCache();", synchronize)
+        same_m5_pos = synchronize.index(same_m5)
+        audit_pos = synchronize.index("AuditSupertrendHistory(")
+        self.assertLess(same_m5_pos, audit_pos)
+        self.assertNotIn("CopyRates(", synchronize[:audit_pos])
+        self.assertNotIn("CopyBuffer(", synchronize[:audit_pos])
+
+        self.assertIn(
+            "SupertrendAuditResult AuditSupertrendHistory(",
+            self.source,
+        )
+        audit = self.function_source(
+            "SupertrendAuditResult AuditSupertrendHistory("
+        )
+        for text in (
+            "int audit_count=g_st_history_count+1;",
+            "CopyRates(g_symbol,PERIOD_M5,1,audit_count,audit_rates)!=audit_count",
+            "CopyBuffer(g_atr_handle,0,1,audit_count,audit_atr)!=audit_count",
+            "for(int i=0;i<g_st_history_count;i++)",
+            "MatchesSupertrendIdentity(g_st_history[i],audit_rates[i],audit_atr[i])",
+            "return ST_AUDIT_MISMATCH;",
+            "return ST_AUDIT_RETRY;",
+            "return ST_AUDIT_MATCH;",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, audit)
+        self.assertNotRegex(audit, r"\bg_st_[A-Za-z0-9_]*\s*=")
+
+    def test_cache_rebuild_publishes_ledger_and_state_atomically(self):
+        initialize = self.function_source("bool InitializeSupertrendCache()")
+        for forbidden in (
+            "ArrayResize(g_st_history",
+            "g_st_history[i]=",
+            "g_st_history_count=",
+            "g_st_final_upper=",
+            "g_st_committed_time=",
+            "ResetSignalState();",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, initialize)
+        self.assertIn(
+            "return PublishSupertrendCache(staged_history,count,upper,lower,"
+            "long_trend,previous_close,committed_time);".replace(" ", ""),
+            initialize.replace("\n", "").replace(" ", ""),
+        )
+
+        publish = self.function_source("bool PublishSupertrendCache(")
+        for text in (
+            "ArrayResize(g_st_history,MAX_HISTORY_BARS)!=MAX_HISTORY_BARS",
+            "g_st_history[i]=staged_history[i];",
+            "g_st_history_count=count;",
+            "g_st_final_upper=upper;",
+            "g_st_committed_time=committed_time;",
+            "g_st_cache_ready=true;",
+            "ResetSignalState();",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, publish)
+
+    def test_supertrend_audit_retries_before_cache_or_ledger_mutation(self):
+        synchronize = self.function_source("bool SynchronizeSupertrendCache(")
+        audit_pos = synchronize.index("AuditSupertrendHistory(")
+        retry_pos = synchronize.index("if(audit_result==ST_AUDIT_RETRY)", audit_pos)
+        advance_pos = synchronize.index("AdvanceSupertrendValues(", audit_pos)
+        append_pos = synchronize.index(
+            "g_st_history[g_st_history_count]=new_identity;", audit_pos
+        )
+        cache_pos = synchronize.index("g_st_final_upper=", audit_pos)
+        self.assertLess(audit_pos, retry_pos)
+        self.assertLess(retry_pos, advance_pos)
+        self.assertLess(advance_pos, append_pos)
+        self.assertLess(append_pos, cache_pos)
+
     def test_supertrend_rebuilds_silently_on_reconnect_and_history_change(self):
         synchronize = self.function_source("bool SynchronizeSupertrendCache(")
         for text in (
             "current_bar.time<g_st_active_time",
-            "previous_bar.time!=g_st_committed_time",
-            "previous_bar.open!=g_st_committed_open",
-            "previous_bar.high!=g_st_committed_high",
-            "previous_bar.low!=g_st_committed_low",
-            "previous_bar.close!=g_st_previous_close",
-            "previous_atr!=g_st_committed_atr",
+            "previous_bar.time!=g_st_active_time",
+            "ST_AUDIT_MISMATCH",
+            "g_st_history_count>=MAX_HISTORY_BARS",
             "return InitializeSupertrendCache();",
         ):
             with self.subTest(text=text):
                 self.assertIn(text, synchronize)
         initialize = self.function_source("bool InitializeSupertrendCache()")
-        self.assertIn("ResetSignalState();", initialize)
+        self.assertIn("PublishSupertrendCache(", initialize)
+        publish = self.function_source("bool PublishSupertrendCache(")
+        self.assertIn("ResetSignalState();", publish)
         timer = self.function_source("void OnTimer()")
         self.assertIn("tick.time_msc<g_previous_server_tick_msc", timer)
         self.assertIn("g_decision_reconnect_reset=reconnect_reset;", timer)
@@ -466,6 +598,23 @@ class PushPlusEaContractTests(unittest.TestCase):
             "bool ReadAdaptiveSignal(ScoreSnapshot &snapshot)"
         )
         self.assertIn("g_st_cache_ready=false;", scoring)
+
+    def test_score_direction_uses_explicit_symmetric_tolerance(self):
+        self.assertIn(
+            "const double SCORE_COMPARISON_TOLERANCE=1e-9;",
+            self.source,
+        )
+        direction = self.function_source(
+            "int ScoreDirection(const double score,const double threshold)"
+        )
+        self.assertIn(
+            "score>=threshold-SCORE_COMPARISON_TOLERANCE",
+            direction,
+        )
+        self.assertIn(
+            "score<=-threshold+SCORE_COMPARISON_TOLERANCE",
+            direction,
+        )
 
     def test_runtime_cache_retry_preserves_calculating_indicator_handles(self):
         initialize = self.function_source("bool TryInitializeRuntime()")

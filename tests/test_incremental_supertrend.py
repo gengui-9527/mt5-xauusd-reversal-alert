@@ -147,6 +147,33 @@ class IncrementalSupertrendTests(unittest.TestCase):
         )
         self.assertAlmostEqual(replayed_line, expected_line, 9)
 
+    def test_older_history_correction_requires_rebuild_to_avoid_stale_state(self):
+        bars = [
+            Bar(300, 100.000, 103.575, 97.671, 102.424, 0.720),
+            Bar(600, 102.424, 107.093, 100.176, 104.267, 0.909),
+            Bar(900, 104.267, 105.604, 102.975, 104.095, 1.016),
+            Bar(1200, 104.095, 106.090, 100.297, 102.173, 0.401),
+            Bar(1500, 102.173, 105.242, 100.245, 103.994, 1.080),
+        ]
+        stale_state = None
+        for bar in bars:
+            stale_state, stale_line = advance_supertrend(stale_state, bar)
+
+        corrected = [
+            *bars[:3],
+            Bar(1200, 104.095, 104.295, 98.502, 102.173, 0.401),
+            bars[4],
+        ]
+        rebuilt_state = None
+        for bar in corrected:
+            rebuilt_state, rebuilt_line = advance_supertrend(rebuilt_state, bar)
+
+        self.assertEqual(stale_state.committed_time, rebuilt_state.committed_time)
+        self.assertNotEqual(stale_state, rebuilt_state)
+        self.assertNotEqual(stale_line, rebuilt_line)
+        self.assertFalse(stale_state.long_trend)
+        self.assertTrue(rebuilt_state.long_trend)
+
 
 if __name__ == "__main__":
     unittest.main()

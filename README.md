@@ -122,7 +122,7 @@ PushPlus 失败不会阻断行情监控，也不会自动重试同一条已确�
 ## 文件
 
 - `MQL5/Experts/XAUUSD_M5_Reversal_Alert_EA.mq5`：EA 源码。
-- `MQL5/Experts/XAUUSD_M5_Reversal_Alert_EA.ex5`：已编译 EA；本次展示更新完成验证后再单独重建交付版本。
+- `MQL5/Experts/XAUUSD_M5_Reversal_Alert_EA.ex5`：当前已通过 MetaEditor 编译与验证，并已交付的 EA。
 - `tests/test_pushplus_ea_contract.py`：EA 安全、消息和展示契约。
 - `tests/test_adaptive_score.py`、`tests/test_adaptive_confirmation.py`：连续评分与确认模型测试。
 - `tests/test_adaptive_replay.py`：历史回放对比测试。
