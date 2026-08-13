@@ -159,7 +159,9 @@ def advance_confirmation(
     if entry_direction == state.pending:
         progress = state.progress + active_seconds / required_seconds(score)
         if progress >= 1.0:
-            return ConfirmationState(confirmed=state.pending, last_tick_ms=last_tick_ms), True
+            return ConfirmationState(
+                confirmed=state.pending, last_tick_ms=last_tick_ms, has_last_tick=True
+            ), True
     elif maintenance_direction == state.pending:
         progress = state.progress - active_seconds / maximum_confirmation_seconds * 0.5
     else:

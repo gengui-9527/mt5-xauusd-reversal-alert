@@ -33,6 +33,18 @@ class AdaptiveConfirmationTests(unittest.TestCase):
         self.assertTrue(alerted)
         self.assertEqual(state.confirmed, -1)
 
+    def test_post_confirmation_reversal_counts_its_first_active_interval(self):
+        state = ConfirmationState(confirmed=1)
+        for now in (1_000, 2_000, 3_000, 4_000):
+            state, alerted = advance_confirmation(state, -80, now)
+        self.assertTrue(alerted)
+
+        state, alerted = advance_confirmation(state, 80, 5_000)
+
+        self.assertFalse(alerted)
+        self.assertEqual(state.pending, 1)
+        self.assertAlmostEqual(state.progress, 1.0 / 3.0)
+
     def test_zero_maximum_active_gap_is_rejected(self):
         with self.assertRaises(ValueError):
             advance_confirmation(
