@@ -16,6 +16,14 @@ class ScoreSnapshot:
     total: float
 
 
+@dataclass(frozen=True)
+class ConfirmationState:
+    confirmed: int = 0
+    pending: int = 0
+    progress: float = 0.0
+    last_tick_ms: int = 0
+
+
 def _require_finite(*values: float) -> None:
     if not all(math.isfinite(value) for value in values):
         raise ValueError("score inputs must be finite")
@@ -78,3 +86,80 @@ def composite_score(
 def required_seconds(score: float) -> float:
     _require_finite(score)
     return max(3.0, min(10.0, 10.0 - (abs(score) - 55.0) * 7.0 / 25.0))
+
+
+def _score_direction(score: float, threshold: float) -> int:
+    if score >= threshold:
+        return 1
+    if score <= -threshold:
+        return -1
+    return 0
+
+
+def advance_confirmation(
+    state: ConfirmationState,
+    score: float,
+    now_ms: int,
+    *,
+    entry_score: float = 55.0,
+    maintenance_score: float = 35.0,
+    maximum_confirmation_seconds: float = 10.0,
+    max_active_gap_ms: int = 1_000,
+    reconnect_reset: bool = False,
+) -> tuple[ConfirmationState, bool]:
+    """Advance confirmation using only the elapsed time between active ticks."""
+    _require_finite(score, entry_score, maintenance_score, maximum_confirmation_seconds)
+    if not 0.0 < maintenance_score < entry_score:
+        raise ValueError("confirmation thresholds must be ordered and positive")
+    if maximum_confirmation_seconds <= 0.0 or max_active_gap_ms < 0:
+        raise ValueError("confirmation timing must be positive")
+
+    if reconnect_reset:
+        state = ConfirmationState()
+
+    entry_direction = _score_direction(score, entry_score)
+    if state.confirmed == 0 and state.pending == 0 and entry_direction:
+        return ConfirmationState(confirmed=entry_direction, last_tick_ms=now_ms), False
+
+    delta_ms = now_ms - state.last_tick_ms if state.last_tick_ms else 0
+    active_seconds = (
+        delta_ms / 1_000.0 if 0 <= delta_ms <= max_active_gap_ms else 0.0
+    )
+    last_tick_ms = now_ms
+
+    if entry_direction == state.confirmed:
+        return ConfirmationState(confirmed=state.confirmed, last_tick_ms=last_tick_ms), False
+
+    if entry_direction and entry_direction != state.pending:
+        progress = active_seconds / required_seconds(score)
+        return ConfirmationState(
+            confirmed=state.confirmed,
+            pending=entry_direction,
+            progress=max(0.0, min(1.0, progress)),
+            last_tick_ms=last_tick_ms,
+        ), False
+
+    if state.pending == 0:
+        return ConfirmationState(confirmed=state.confirmed, last_tick_ms=last_tick_ms), False
+
+    maintenance_direction = _score_direction(score, maintenance_score)
+    if maintenance_direction == -state.pending:
+        return ConfirmationState(confirmed=state.confirmed, last_tick_ms=last_tick_ms), False
+
+    if entry_direction == state.pending:
+        progress = state.progress + active_seconds / required_seconds(score)
+        if progress >= 1.0:
+            return ConfirmationState(confirmed=state.pending, last_tick_ms=last_tick_ms), True
+    elif maintenance_direction == state.pending:
+        progress = state.progress - active_seconds / maximum_confirmation_seconds * 0.5
+    else:
+        progress = state.progress - active_seconds / maximum_confirmation_seconds
+
+    progress = max(0.0, min(1.0, progress))
+    pending = state.pending if progress > 0.0 else 0
+    return ConfirmationState(
+        confirmed=state.confirmed,
+        pending=pending,
+        progress=progress,
+        last_tick_ms=last_tick_ms,
+    ), False
