@@ -1,5 +1,6 @@
 import math
 import unittest
+from unittest.mock import patch
 
 from tests.adaptive_score_model import (
     ScoreSnapshot,
@@ -42,6 +43,21 @@ class AdaptiveScoreTests(unittest.TestCase):
         self.assertEqual(score, ScoreSnapshot(35.0, 40.0, 25.0, 100.0))
         with self.assertRaises(AttributeError):
             score.total = 0.0
+
+    def test_composite_clamps_aggregate_beyond_both_total_bounds(self):
+        cases = ((50.0, 60.0, 70.0, 100.0), (-50.0, -60.0, -70.0, -100.0))
+        for ema, supertrend, rsi, expected_total in cases:
+            with self.subTest(components=(ema, supertrend, rsi)):
+                with (
+                    patch("tests.adaptive_score_model.ema_score", return_value=ema),
+                    patch(
+                        "tests.adaptive_score_model.supertrend_score",
+                        return_value=supertrend,
+                    ),
+                    patch("tests.adaptive_score_model.rsi_score", return_value=rsi),
+                ):
+                    score = composite_score(1, 1, 1, 1, 1, 1, 50)
+                self.assertEqual(score.total, expected_total)
 
     def test_non_positive_or_non_finite_atr_is_rejected_before_scoring(self):
         for atr in (0.0, -1.0, math.nan, math.inf):
