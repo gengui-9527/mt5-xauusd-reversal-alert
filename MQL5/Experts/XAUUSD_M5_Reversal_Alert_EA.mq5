@@ -97,6 +97,17 @@ string DirectionText(const int direction)
    if(direction==DIR_SHORT) return "空";
    return "中性";
   }
+string ScoreBiasText(const int direction)
+  {
+   if(direction==DIR_LONG) return "偏多";
+   if(direction==DIR_SHORT) return "偏空";
+   return "中性";
+  }
+string SignedScore(const double score)
+  {
+   string formatted=DoubleToString(score,1);
+   return StringGetCharacter(formatted,0)=='-' ? formatted : "+"+formatted;
+  }
 color DirectionColor(const int direction)
   {
    if(direction==DIR_LONG) return InpLongColor;
@@ -525,9 +536,10 @@ string BuildReversalContent(const int previous_direction,const int direction,
    string transition=(previous_direction==DIR_SHORT && direction==DIR_LONG) ? "空转多" : "多转空";
    return "品种："+g_symbol+"\n周期：M5\n方向："+transition+
           "\n服务器时间："+TimeToString(s.server_time,TIME_DATE|TIME_SECONDS)+
-          "\nEMA："+DoubleToString(s.ema_score,1)+
-          "\nSupertrend："+DoubleToString(s.supertrend_score,1)+
-          "\nRSI："+DoubleToString(s.rsi_score,1)+
+          "\n最终评分："+SignedScore(s.total_score)+
+          "\nEMA贡献："+SignedScore(s.ema_score)+
+          "\nSupertrend贡献："+SignedScore(s.supertrend_score)+
+          "\nRSI贡献："+SignedScore(s.rsi_score)+
           "\n确认时间："+DoubleToString(s.required_seconds,1)+" 秒";
   }
 bool IsJsonWhitespace(const ushort ch)
@@ -805,9 +817,10 @@ void ShowLargeNotification(const int previous_direction,const int direction,
 
    CreateLargeLabel("LARGE_TITLE",g_symbol+" · M5  "+transition,28,accent);
    string body="服务器时间："+TimeToString(s.server_time,TIME_DATE|TIME_SECONDS)+
-               "\nEMA："+DoubleToString(s.ema_score,1)+
-               "\nSupertrend："+DoubleToString(s.supertrend_score,1)+
-               "\nRSI："+DoubleToString(s.rsi_score,1)+
+               "\n最终评分："+SignedScore(s.total_score)+
+               "\nEMA贡献："+SignedScore(s.ema_score)+
+               "\nSupertrend贡献："+SignedScore(s.supertrend_score)+
+               "\nRSI贡献："+SignedScore(s.rsi_score)+
                "\nPushPlus："+g_push_status;
    CreateLargeLabel("LARGE_BODY",body,15,clrWhite);
    CreateLargeLabel("LARGE_COUNTDOWN","",12,clrSilver);
@@ -883,28 +896,54 @@ void RenderPanel()
    SetLabel("TITLE",0,shown+" · M5 PushPlus 多空监控",clrWhite);
    SetLabel("DIR",1,"已确认方向："+DirectionText(g_confirmed_direction),DirectionColor(g_confirmed_direction));
    if(g_has_snapshot)
-      SetLabel("VOTES",2,"EMA "+DoubleToString(g_snapshot.ema_score,1)+" | Supertrend "+
-               DoubleToString(g_snapshot.supertrend_score,1)+" | RSI "+
-               DoubleToString(g_snapshot.rsi_score,1),InpNeutralColor);
-   else SetLabel("VOTES",2,"EMA - | Supertrend - | RSI -",InpNeutralColor);
-   string pending="候选：无";
+     {
+      int score_direction=ScoreDirection(g_snapshot.total_score,
+                                         InpDirectionMaintenanceScore);
+      SetLabel("BIAS",2,"评分方向："+ScoreBiasText(score_direction),
+               DirectionColor(score_direction));
+      SetLabel("TOTAL",3,"综合评分："+SignedScore(g_snapshot.total_score),
+               DirectionColor(score_direction));
+      SetLabel("EMA",4,"EMA贡献："+SignedScore(g_snapshot.ema_score),
+               InpNeutralColor);
+      SetLabel("SUPER",5,"Supertrend贡献："+SignedScore(g_snapshot.supertrend_score),
+               InpNeutralColor);
+      SetLabel("RSI",6,"RSI贡献："+SignedScore(g_snapshot.rsi_score),
+               InpNeutralColor);
+     }
+   else
+     {
+      SetLabel("BIAS",2,"评分方向：中性",InpNeutralColor);
+      SetLabel("TOTAL",3,"综合评分：-",InpNeutralColor);
+      SetLabel("EMA",4,"EMA贡献：-",InpNeutralColor);
+      SetLabel("SUPER",5,"Supertrend贡献：-",InpNeutralColor);
+      SetLabel("RSI",6,"RSI贡献：-",InpNeutralColor);
+     }
+   string pending_direction="无";
+   string target_confirmation="0.0 秒";
+   string confirmation_progress="0%";
+   string remaining="0.0 秒";
    if(g_pending_direction!=DIR_NONE)
      {
       double remaining_seconds=
          MathMax(0.0,(1.0-g_confirmation_progress)*
                     MathMax(InpMinimumConfirmationSeconds,
                             g_pending_required_seconds));
-      pending="候选："+DirectionText(g_pending_direction)+"，进度 "+
-              DoubleToString(g_confirmation_progress*100.0,0)+"%，剩余 "+
-              DoubleToString(remaining_seconds,1)+" 秒";
+      pending_direction=DirectionText(g_pending_direction);
+      target_confirmation=DoubleToString(g_pending_required_seconds,1)+" 秒";
+      confirmation_progress=DoubleToString(g_confirmation_progress*100.0,0)+"%";
+      remaining=DoubleToString(remaining_seconds,1)+" 秒";
      }
-   SetLabel("PENDING",3,pending,DirectionColor(g_pending_direction));
-   SetLabel("PUSH",4,"PushPlus："+g_push_status,InpNeutralColor);
-   SetLabel("STATUS",5,"状态："+g_status,InpNeutralColor);
+   SetLabel("PENDING",7,"候选方向："+pending_direction,
+            DirectionColor(g_pending_direction));
+   SetLabel("TARGET",8,"目标确认："+target_confirmation,InpNeutralColor);
+   SetLabel("PROGRESS",9,"确认进度："+confirmation_progress,InpNeutralColor);
+   SetLabel("REMAINING",10,"剩余："+remaining,InpNeutralColor);
+   SetLabel("PUSH",11,"PushPlus："+g_push_status,InpNeutralColor);
+   SetLabel("STATUS",12,"状态："+g_status,InpNeutralColor);
    string warnings="";
    if(g_sound_warning!="") warnings=g_sound_warning;
    if(g_push_warning!="") warnings+=(warnings=="" ? "" : " | ")+g_push_warning;
-   SetLabel("WARN",6,"警告："+(warnings=="" ? "无" : warnings),
+   SetLabel("WARN",13,"警告："+(warnings=="" ? "无" : warnings),
             warnings=="" ? InpNeutralColor : InpErrorColor);
    ChartRedraw(0);
   }

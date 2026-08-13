@@ -74,7 +74,8 @@ class PushPlusEaContractTests(unittest.TestCase):
             with self.subTest(escape=escape):
                 self.assertIn(escape, self.source)
 
-    def test_reversal_message_contains_approved_semantics(self):
+    def test_reversal_message_contains_adaptive_score_breakdown(self):
+        content = self.function_source("string BuildReversalContent(")
         for text in (
             "空转多提醒",
             "多转空提醒",
@@ -82,13 +83,17 @@ class PushPlusEaContractTests(unittest.TestCase):
             "周期：M5",
             "方向：",
             "服务器时间：",
-            "EMA：",
-            "Supertrend：",
-            "RSI：",
+            "最终评分：",
+            "EMA贡献：",
+            "Supertrend贡献：",
+            "RSI贡献：",
             "确认时间：",
         ):
             with self.subTest(text=text):
-                self.assertIn(text, self.source)
+                self.assertIn(text, self.source if text.endswith("提醒") else content)
+        for legacy in ("\nEMA：", "\nSupertrend：", "\nRSI："):
+            with self.subTest(legacy=legacy):
+                self.assertNotIn(legacy, content)
 
     def test_token_is_not_logged_displayed_or_put_in_url(self):
         forbidden_patterns = (
@@ -140,9 +145,60 @@ class PushPlusEaContractTests(unittest.TestCase):
         ]
         self.assertNotIn("g_sound_warning=", send)
 
-    def test_panel_displays_remaining_confirmation_time(self):
-        self.assertIn("remaining_seconds", self.source)
-        self.assertIn("剩余", self.source)
+    def test_panel_displays_signed_adaptive_score_and_confirmation_progress(self):
+        panel = self.function_source("void RenderPanel()")
+        for text in (
+            "综合评分：",
+            "EMA贡献：",
+            "Supertrend贡献：",
+            "RSI贡献：",
+            "已确认方向：",
+            "候选方向：",
+            "目标确认：",
+            "确认进度：",
+            "剩余：",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, panel)
+        for score in (
+            "g_snapshot.total_score",
+            "g_snapshot.ema_score",
+            "g_snapshot.supertrend_score",
+            "g_snapshot.rsi_score",
+        ):
+            with self.subTest(score=score):
+                self.assertIn(f"SignedScore({score})", panel)
+        self.assertIn("MathMax(0.0,", panel)
+        self.assertIn('string pending_direction="无";', panel)
+
+    def test_panel_interprets_score_using_maintenance_threshold(self):
+        panel = self.function_source("void RenderPanel()")
+        self.assertIn(
+            "ScoreDirection(g_snapshot.total_score,"
+            "InpDirectionMaintenanceScore)".replace(" ", ""),
+            panel.replace("\n", "").replace(" ", ""),
+        )
+        for text in ("偏多", "偏空", "中性"):
+            with self.subTest(text=text):
+                self.assertIn(text, self.source)
+
+    def test_signed_score_uses_the_rounded_text_sign(self):
+        signed = self.function_source("string SignedScore(const double score)")
+        self.assertIn("string formatted=DoubleToString(score,1);", signed)
+        self.assertIn("StringGetCharacter(formatted,0)=='-'", signed)
+        self.assertNotIn("score>=0.0", signed)
+
+    def test_directional_pushplus_has_one_final_emission_call_site(self):
+        emit = self.function_source("void EmitConfirmedReversal(")
+        panel = self.function_source("void RenderPanel()")
+        candidate = self.function_source(
+            "bool AdvanceAdaptiveState(const double score,const ulong now_ms)"
+        )
+        self.assertEqual(self.source.count("SendPushPlus(title,content);"), 1)
+        self.assertIn("SendPushPlus(title,content);", emit)
+        self.assertIn("BuildReversalContent(", emit)
+        self.assertNotIn("SendPushPlus(", panel)
+        self.assertNotIn("SendPushPlus(", candidate)
 
     def test_adaptive_inputs_have_approved_defaults(self):
         for text in (
@@ -483,9 +539,10 @@ class PushPlusEaContractTests(unittest.TestCase):
             "空转多",
             "多转空",
             "服务器时间",
-            "EMA",
-            "Supertrend",
-            "RSI",
+            "最终评分：",
+            "EMA贡献：",
+            "Supertrend贡献：",
+            "RSI贡献：",
             "PushPlus",
         ):
             with self.subTest(text=text):
@@ -498,8 +555,8 @@ class PushPlusEaContractTests(unittest.TestCase):
             "large_font_size",
             "MathMax(1,chart_width-4)",
             "MathMax(1,chart_height-4)",
-            '"\\nSupertrend："',
-            '"\\nRSI："',
+            '"\\nSupertrend贡献："',
+            '"\\nRSI贡献："',
             "OBJPROP_ZORDER,1",
             "OBJPROP_ZORDER,100",
             "OBJPROP_STATE,false",
