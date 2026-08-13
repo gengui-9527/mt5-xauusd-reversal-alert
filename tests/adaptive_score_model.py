@@ -157,15 +157,18 @@ def advance_supertrend(
 
 
 def preview_supertrend(
-    state: SupertrendState,
+    state: SupertrendState | None,
     current_bar: Bar,
     *,
     multiplier: float = 2.4,
 ) -> tuple[SupertrendState, float]:
-    if current_bar.time <= state.committed_time:
+    if state is not None and current_bar.time <= state.committed_time:
         raise ValueError("preview time must be newer than committed time")
     return _next_supertrend(
-        state, current_bar, committed_time=state.committed_time, multiplier=multiplier
+        state,
+        current_bar,
+        committed_time=state.committed_time if state is not None else 0,
+        multiplier=multiplier,
     )
 
 

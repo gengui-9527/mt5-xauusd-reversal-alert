@@ -14,6 +14,7 @@ from tests.adaptive_score_model import (
     advance_confirmation,
     advance_supertrend,
     composite_score,
+    preview_supertrend,
 )
 
 
@@ -24,6 +25,20 @@ DEFAULT_FIXTURE = (
     / "xauusd_m5_adaptive_replay.csv"
 )
 CLEAR_REVERSALS = ("top_reversal", "v_reversal")
+EXPECTED_DIRECTIONS = {"top_reversal": -1, "v_reversal": 1}
+COLUMNS = (
+    "segment",
+    "time",
+    "open",
+    "high",
+    "low",
+    "close",
+    "atr",
+    "fast",
+    "slow",
+    "previous_fast",
+    "rsi",
+)
 
 
 @dataclass(frozen=True)
@@ -51,11 +66,13 @@ class Alert:
     segment: str
     time: int
     direction: int
+    confirmation_seconds: int
 
 
 @dataclass(frozen=True)
 class ReportRow:
     segment: str
+    direction: int
     legacy_alert_time: int | None
     adaptive_alert_time: int | None
     adaptive_lead_seconds: int | None
@@ -70,6 +87,20 @@ class ReplayResult:
     legacy_range_alert_count: int
     adaptive_range_alert_count: int
     duplicate_adaptive_directions: tuple[int, ...]
+    observations: tuple["ReplayObservation", ...]
+
+
+@dataclass(frozen=True)
+class ReplayObservation:
+    segment: str
+    row_time: int
+    offset: int
+    committed_time: int | None
+    preview_time: int
+    supertrend_line: float
+    score: float
+    pending_direction: int
+    confirmation_progress: float
 
 
 @dataclass
@@ -82,20 +113,7 @@ class _LegacyState:
 def load_fixture(path: Path | str = DEFAULT_FIXTURE) -> list[ReplayRow]:
     with Path(path).open(newline="", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle)
-        required = {
-            "segment",
-            "time",
-            "open",
-            "high",
-            "low",
-            "close",
-            "atr",
-            "fast",
-            "slow",
-            "previous_fast",
-            "rsi",
-        }
-        if set(reader.fieldnames or ()) != required:
+        if tuple(reader.fieldnames or ()) != COLUMNS:
             raise ValueError("replay fixture columns do not match the contract")
         return [
             ReplayRow(
@@ -158,6 +176,50 @@ def _duplicate_directions(alerts: Iterable[Alert]) -> tuple[int, ...]:
     )
 
 
+def build_report(
+    legacy_alerts: Iterable[Alert], adaptive_alerts: Iterable[Alert]
+) -> tuple[ReportRow, ...]:
+    legacy_alerts = tuple(legacy_alerts)
+    adaptive_alerts = tuple(adaptive_alerts)
+
+    def first_time(
+        alerts: tuple[Alert, ...], segment: str, direction: int
+    ) -> int | None:
+        return next(
+            (
+                alert.time
+                for alert in alerts
+                if alert.segment == segment and alert.direction == direction
+            ),
+            None,
+        )
+
+    adaptive_range_count = sum(
+        alert.segment == "range" for alert in adaptive_alerts
+    )
+    report_rows = []
+    for segment in (*CLEAR_REVERSALS, "range"):
+        direction = EXPECTED_DIRECTIONS.get(segment, 0)
+        legacy_time = first_time(legacy_alerts, segment, direction)
+        adaptive_time = first_time(adaptive_alerts, segment, direction)
+        lead = (
+            legacy_time - adaptive_time
+            if legacy_time is not None and adaptive_time is not None
+            else None
+        )
+        report_rows.append(
+            ReportRow(
+                segment,
+                direction,
+                legacy_time,
+                adaptive_time,
+                lead,
+                adaptive_range_count if segment == "range" else 0,
+            )
+        )
+    return tuple(report_rows)
+
+
 def compare_replay(rows: Iterable[ReplayRow]) -> ReplayResult:
     rows = list(rows)
     if not rows:
@@ -168,40 +230,78 @@ def compare_replay(rows: Iterable[ReplayRow]) -> ReplayResult:
     adaptive_state = ConfirmationState()
     legacy_alerts: list[Alert] = []
     adaptive_alerts: list[Alert] = []
+    observations: list[ReplayObservation] = []
+    previous_row: ReplayRow | None = None
+    adaptive_pending_started_ms: int | None = None
 
     for row in rows:
-        supertrend_state, line = advance_supertrend(supertrend_state, row.bar())
-        legacy_direction = _legacy_vote(row, supertrend_state.long_trend)
-        score = composite_score(
-            row.fast,
-            row.slow,
-            row.previous_fast,
-            row.close,
-            line,
-            row.atr,
-            row.rsi,
-        ).total
+        if previous_row is not None:
+            supertrend_state, _ = advance_supertrend(
+                supertrend_state, previous_row.bar()
+            )
 
-        # Tick zero plus ten elapsed one-second intervals lets a literal
-        # ten-second legacy hold complete at offset 10.
+        # Offsets 0..10 are eleven observations spanning exactly ten elapsed
+        # one-second intervals, including both boundaries of the hold.
         for offset in range(11):
+            preview_state, line = preview_supertrend(supertrend_state, row.bar())
+            legacy_direction = _legacy_vote(row, preview_state.long_trend)
+            score = composite_score(
+                row.fast,
+                row.slow,
+                row.previous_fast,
+                row.close,
+                line,
+                row.atr,
+                row.rsi,
+            ).total
             now = row.time + offset
             legacy_state, legacy_alerted = _advance_legacy(
                 legacy_state, legacy_direction, now
             )
             if legacy_alerted:
-                legacy_alerts.append(Alert(row.segment, now, legacy_direction))
+                legacy_alerts.append(Alert(row.segment, now, legacy_direction, 10))
 
+            prior_pending = adaptive_state.pending
             adaptive_state, adaptive_alerted = advance_confirmation(
                 adaptive_state, score, now * 1_000
             )
+            if adaptive_state.pending and adaptive_state.pending != prior_pending:
+                adaptive_pending_started_ms = now * 1_000
+            elif not adaptive_state.pending and not adaptive_alerted:
+                adaptive_pending_started_ms = None
             if adaptive_alerted:
-                adaptive_alerts.append(
-                    Alert(row.segment, now, adaptive_state.confirmed)
+                confirmation_seconds = (
+                    int((now * 1_000 - adaptive_pending_started_ms) / 1_000)
+                    if adaptive_pending_started_ms is not None
+                    else 0
                 )
-
-    def first_time(alerts: list[Alert], segment: str) -> int | None:
-        return next((alert.time for alert in alerts if alert.segment == segment), None)
+                adaptive_alerts.append(
+                    Alert(
+                        row.segment,
+                        now,
+                        adaptive_state.confirmed,
+                        confirmation_seconds,
+                    )
+                )
+                adaptive_pending_started_ms = None
+            observations.append(
+                ReplayObservation(
+                    row.segment,
+                    row.time,
+                    offset,
+                    (
+                        supertrend_state.committed_time
+                        if supertrend_state is not None
+                        else None
+                    ),
+                    preview_state.committed_time,
+                    line,
+                    score,
+                    adaptive_state.pending,
+                    adaptive_state.progress,
+                )
+            )
+        previous_row = row
 
     legacy_range_count = sum(
         alert.segment == "range" for alert in legacy_alerts
@@ -209,32 +309,14 @@ def compare_replay(rows: Iterable[ReplayRow]) -> ReplayResult:
     adaptive_range_count = sum(
         alert.segment == "range" for alert in adaptive_alerts
     )
-    report_rows = []
-    for segment in (*CLEAR_REVERSALS, "range"):
-        legacy_time = first_time(legacy_alerts, segment)
-        adaptive_time = first_time(adaptive_alerts, segment)
-        lead = (
-            legacy_time - adaptive_time
-            if legacy_time is not None and adaptive_time is not None
-            else None
-        )
-        report_rows.append(
-            ReportRow(
-                segment,
-                legacy_time,
-                adaptive_time,
-                lead,
-                adaptive_range_count if segment == "range" else 0,
-            )
-        )
-
     return ReplayResult(
-        tuple(report_rows),
+        build_report(legacy_alerts, adaptive_alerts),
         tuple(legacy_alerts),
         tuple(adaptive_alerts),
         legacy_range_count,
         adaptive_range_count,
         _duplicate_directions(adaptive_alerts),
+        tuple(observations),
     )
 
 
@@ -281,8 +363,13 @@ def acceptance_failures(result: ReplayResult) -> list[str]:
     return failures
 
 
-def main() -> int:
-    result = compare_replay(load_fixture())
+def main(args: list[str] | None = None) -> int:
+    args = sys.argv[1:] if args is None else args
+    if len(args) > 1:
+        print("usage: compare_adaptive_replay.py [fixture.csv]", file=sys.stderr)
+        return 2
+    fixture = Path(args[0]) if args else DEFAULT_FIXTURE
+    result = compare_replay(load_fixture(fixture))
     print_report(result)
     failures = acceptance_failures(result)
     for failure in failures:

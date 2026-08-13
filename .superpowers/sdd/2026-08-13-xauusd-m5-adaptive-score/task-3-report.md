@@ -150,3 +150,98 @@ Results:
   duplicate-direction acceptance.
 - No network, current-date, broker, trading API, secret, or MQL change was
   introduced.
+
+## Fix Round 1
+
+### Review regressions: RED
+
+The expanded replay tests were written before the fixes. The first focused run
+failed at import with:
+
+```text
+ImportError: cannot import name 'build_report' from
+'tools.compare_adaptive_replay'
+FAILED (errors=1)
+```
+
+After implementing the lifecycle/report API but before changing the fixture,
+the focused run had two expected failures:
+
+```text
+FAIL: test_graded_reversals_include_confirmation_longer_than_three_seconds
+FAIL: test_range_creates_and_rewinds_candidate_without_alerting
+Ran 11 tests
+FAILED (failures=2)
+```
+
+A separate score-distribution regression failed for all three missing targets:
+
+```text
+test_fixture_exercises_scores_near_55_70_and_80
+FAILED (failures=3)
+```
+
+These failures directly demonstrated that the original fixture saturated both
+reversals at three seconds and never created a range candidate.
+
+### Fix-round behavior: GREEN
+
+- The replay now retains the committed Supertrend state through the current M5
+  row, previews the current bar on every active tick, and commits that row once
+  only when the next M5 row begins.
+- Observation diagnostics prove all eleven offsets leave the committed state
+  unchanged and that changing the committed prior bar changes the next preview.
+- Expected directions are explicit: `top_reversal=-1`, `v_reversal=+1`.
+  Report alert selection requires both matching segment and direction.
+- A synthetic regression proves an earlier wrong-direction alert is ignored.
+- CSV column order is checked exactly.
+- Offsets `0..10` are explicitly tested and documented as eleven observations
+  spanning ten elapsed one-second intervals.
+- The fixed 120-row fixture retains the exact schema and segment sizes while
+  adding first-tick absolute scores of 55, 70, and 80.
+- Correct-direction adaptive confirmations now take 6 seconds bearish and
+  4 seconds bullish, rather than both saturating at 3 seconds.
+- Range evidence crosses entry, maintenance, and neutral zones: it creates a
+  candidate, rewinds it, and clears it without an adaptive range alert.
+- The CLI accepts zero or one fixture path. A supplied one-row failing fixture
+  controls the report and returns exit 1; more than one argument returns usage
+  error 2.
+
+Focused replay output:
+
+```text
+segment,legacy_alert_time,adaptive_alert_time,adaptive_lead_seconds,range_alert_count
+top_reversal,1704076210,1704076206,4,0
+v_reversal,1704091210,1704091204,6,0
+range,,,,0
+```
+
+Replay diagnostics:
+
+```text
+graded scores: [55.0, 70.0, 80.0]
+adaptive reversal confirmations: bearish=6s, bullish=4s
+range alerts: legacy=2, adaptive=0
+duplicate adaptive directions: none
+```
+
+### Fix-round final verification
+
+Commands:
+
+```text
+python -m unittest tests.test_incremental_supertrend tests.test_adaptive_replay -v
+python tools/compare_adaptive_replay.py
+python -m unittest discover -s tests -v
+python -m py_compile tests/adaptive_score_model.py tests/test_incremental_supertrend.py tests/test_adaptive_replay.py tools/compare_adaptive_replay.py
+git diff --check
+```
+
+Results:
+
+- focused incremental/replay tests: 17 passed;
+- default replay: exit 0 with 4-second bearish and 6-second bullish lead;
+- full suite: 70 passed;
+- Python compilation: exit 0;
+- diff check: exit 0;
+- informational Windows LF-to-CRLF normalization warnings only.
