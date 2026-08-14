@@ -1,0 +1,15 @@
+XAUUSD M5 PushPlus Alert EA build provenance
+Build date: 2026-08-13
+Compiler: MetaEditor 5.0.0.6104, X64 Regular
+Compile result: 0 errors, 0 warnings
+Unit tests: 93 passed, 0 failed
+Faithful legacy replay: EMA 9/21; Wilder ATR 10; Supertrend 3.0; Wilder RSI 14/50; two-of-three vote; 10 active seconds
+Adaptive replay: accepted; top reversal lead 904 seconds; V reversal lead 6 seconds; legacy/adaptive range alerts 0/0; duplicate adaptive directions 0
+
+SHA256 XAUUSD_M5_Reversal_Alert_EA.mq5
+25DFDEEAC4F668D09913343143A2BDFD21493226DA68787AC03C85C191531F93
+
+SHA256 XAUUSD_M5_Reversal_Alert_EA.ex5
+648E00977535513E384F58502B6B8051EFCCBFA09D7BBBA18A96B87B06FF699B
+
+No PushPlus Token is stored in this record or any repository artifact.
